@@ -16,6 +16,7 @@ except ModuleNotFoundError:
 
 from src.core import (
     XlsxRowWriter,
+    MultiSheetXlsxWriter,
     build_output_path,
     connect_existing_chromium,
     interruptible_sleep,
@@ -23,6 +24,7 @@ from src.core import (
     should_stop,
 )
 from src.core import expand_compact_number, extract_tiktok_video_title
+from src.platforms.tiktok.comments import collect_video_comments
 
 
 CSV_FIELDS = ["序号", "视频链接", "发布日期", "视频简介", "点赞数", "评论数", "收藏量"]
@@ -389,9 +391,13 @@ def save_batch_and_wait(writer: XlsxRowWriter, written_count: int, log_callback,
 def process_video_batch(
     detail_page,
     video_links: list[str],
-    start_dt: datetime,
-    end_dt: datetime,
-    writer: XlsxRowWriter,
+    start_dt: datetime | None,
+    end_dt: datetime | None,
+    limit_time_bool: bool,
+    get_video_info_bool: bool,
+    get_comments_bool: bool,
+    max_comments: int,
+    writer,
     serial_number: int,
     written_count: int,
     log_callback,
@@ -405,29 +411,58 @@ def process_video_batch(
             break
         try:
             log_line(log_callback, f"    [{batch_index}/{len(video_links)}] 读取视频：{video_url}")
-            detail = extract_video_detail(detail_page, video_url)
-            published_at = detail.get("published_at", "")
-            publish_dt = parse_publish_date(published_at)
+            
+            detail = {"video_url": video_url}
+            if get_video_info_bool or get_comments_bool or limit_time_bool:
+                detail = extract_video_detail(detail_page, video_url)
+                published_at = detail.get("published_at", "")
+                
+                if limit_time_bool and start_dt and end_dt:
+                    publish_dt = parse_publish_date(published_at)
+                    if publish_dt and publish_dt.date() < start_dt.date():
+                        log_line(log_callback, f"      停止当前主页：视频发布时间早于开始日期（{published_at}）。")
+                        stop_profile = True
+                        wait_after_detail(log_callback, stop_event)
+                        break
 
-            if publish_dt and publish_dt.date() < start_dt.date():
-                log_line(log_callback, f"      停止当前主页：视频发布时间早于开始日期（{published_at}）。")
-                stop_profile = True
-                wait_after_detail(log_callback, stop_event)
-                break
+                    if not in_date_range(published_at, start_dt, end_dt):
+                        log_line(log_callback, f"      跳过：发布时间不在范围内（{published_at or '未解析'}）。")
+                        if wait_after_detail(log_callback, stop_event):
+                            break
+                        continue
 
-            if not in_date_range(published_at, start_dt, end_dt):
-                log_line(log_callback, f"      跳过：发布时间不在范围内（{published_at or '未解析'}）。")
-                if wait_after_detail(log_callback, stop_event):
-                    break
-                continue
+            row_base = row_from_detail(serial_number, detail) if get_video_info_bool else {"序号": str(serial_number), "视频链接": video_url}
+            
+            if get_comments_bool:
+                comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event)
+                writer.writerow("视频信息", sanitize_csv_row(row_base))
+                for comment in comments:
+                    comment_row = {
+                        "序号": str(serial_number),
+                        "视频链接": video_url,
+                        "评论的点赞量": comment.get("like_count", ""),
+                        "评论内容": comment.get("text", ""),
+                        "发布时间": comment.get("create_time", "")
+                    }
+                    writer.writerow("评论信息", sanitize_csv_row(comment_row))
+                
+                written_count += 1
+                log_line(
+                    log_callback,
+                    f"      写入：点赞 {detail.get('likes') or '空'}，评论数 {detail.get('comments') or '空'}，抓取到主楼评论 {len(comments)} 条。",
+                )
+            else:
+                writer.writerow(sanitize_csv_row(row_base))
+                written_count += 1
+                if get_video_info_bool:
+                    log_line(
+                        log_callback,
+                        f"      写入：点赞 {detail.get('likes') or '空'}，评论 {detail.get('comments') or '空'}，收藏 {detail.get('collects') or '空'}。",
+                    )
+                else:
+                    log_line(log_callback, f"      写入视频链接：{video_url}")
 
-            writer.writerow(sanitize_csv_row(row_from_detail(serial_number, detail)))
-            written_count += 1
             serial_number += 1
-            log_line(
-                log_callback,
-                f"      写入：点赞 {detail.get('likes') or '空'}，评论 {detail.get('comments') or '空'}，收藏 {detail.get('collects') or '空'}。",
-            )
             if save_batch_and_wait(writer, written_count, log_callback, stop_event):
                 break
         except Exception as exc:
@@ -443,6 +478,11 @@ def run_tiktok_profile_videos_spider(
     txt_path: str,
     start_date: str,
     end_date: str,
+    limit_time_str: str,
+    max_scrolls: int,
+    get_video_info_str: str,
+    get_comments_str: str,
+    max_comments: int,
     cdp_port_or_url: str,
     log_callback,
     finish_callback,
@@ -460,11 +500,31 @@ def run_tiktok_profile_videos_spider(
             log_line(log_callback, "TXT 中没有找到有效的 TikTok 博主主页链接。")
             return
 
-        start_dt, end_dt = parse_date_range(start_date, end_date)
+        limit_time_bool = (limit_time_str == "是")
+        get_video_info_bool = (get_video_info_str == "是")
+        get_comments_bool = (get_comments_str == "是")
+
+        start_dt = None
+        end_dt = None
+        if limit_time_bool:
+            start_dt, end_dt = parse_date_range(start_date, end_date)
+
+        video_fields = ["序号", "视频链接"]
+        if get_video_info_bool:
+            video_fields.extend(["发布日期", "视频简介", "点赞数", "评论数", "收藏量"])
+
         output_path = build_output_path("tiktok", f"tiktok_profile_videos_{time.strftime('%Y%m%d')}.xlsx")
-        writer = XlsxRowWriter(output_path, CSV_FIELDS)
+        if get_comments_bool:
+            comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
+            writer = MultiSheetXlsxWriter(output_path, {"视频信息": video_fields, "评论信息": comment_fields})
+        else:
+            writer = XlsxRowWriter(output_path, video_fields)
+
         written_count = 0
         serial_number = 1
+        
+        actual_max_scrolls = max_scrolls if max_scrolls > 0 else 999999
+        no_new_limit = 5 if not limit_time_bool else NO_NEW_SCROLL_LIMIT
 
         with sync_playwright() as playwright:
             log_line(log_callback, "正在连接本地 Chrome，请确认已登录 TikTok。")
@@ -498,14 +558,14 @@ def run_tiktok_profile_videos_spider(
                 no_new_count = 0
                 stop_profile = False
 
-                for scroll_index in range(DEFAULT_MAX_SCROLLS):
+                for scroll_index in range(actual_max_scrolls):
                     if should_stop(stop_event):
                         break
 
                     new_links = collect_visible_video_links(profile_page, seen_links)
                     if new_links:
                         no_new_count = 0
-                        log_line(log_callback, f"  滚动 {scroll_index + 1}/{DEFAULT_MAX_SCROLLS}：发现 {len(new_links)} 条新视频链接。")
+                        log_line(log_callback, f"  滚动 {scroll_index + 1}/{actual_max_scrolls}：发现 {len(new_links)} 条新视频链接。")
                         pending_links.extend(new_links)
                     else:
                         no_new_count += 1
@@ -518,6 +578,10 @@ def run_tiktok_profile_videos_spider(
                             batch,
                             start_dt,
                             end_dt,
+                            limit_time_bool,
+                            get_video_info_bool,
+                            get_comments_bool,
+                            max_comments,
                             writer,
                             serial_number,
                             written_count,
@@ -527,13 +591,17 @@ def run_tiktok_profile_videos_spider(
                     if stop_profile:
                         break
 
-                    if no_new_count >= NO_NEW_SCROLL_LIMIT:
+                    if no_new_count >= no_new_limit:
                         if pending_links and not should_stop(stop_event):
                             serial_number, written_count, stop_profile = process_video_batch(
                                 detail_page,
                                 pending_links,
                                 start_dt,
                                 end_dt,
+                                limit_time_bool,
+                                get_video_info_bool,
+                                get_comments_bool,
+                                max_comments,
                                 writer,
                                 serial_number,
                                 written_count,
@@ -554,6 +622,10 @@ def run_tiktok_profile_videos_spider(
                         pending_links,
                         start_dt,
                         end_dt,
+                        limit_time_bool,
+                        get_video_info_bool,
+                        get_comments_bool,
+                        max_comments,
                         writer,
                         serial_number,
                         written_count,

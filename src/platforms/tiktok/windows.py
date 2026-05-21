@@ -73,17 +73,51 @@ class TikTokProfileVideosWindow(SimpleToolWindow):
             "TikTok 博主主页视频指标采集",
             [
                 FieldSpec("txt_path", "博主主页 TXT", kind="file", required=True),
-                FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE, required=True),
-                FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE, required=True),
+                FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="是"),
+                FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
+                FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
+                FieldSpec("max_scrolls", "最大滚动上限 (-1为无限)", kind="int", default=-1, minimum=-1, maximum=999999),
+                FieldSpec("get_video_info", "是否获取视频信息？", kind="combo", options=("是", "否"), default="是"),
+                FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
+                FieldSpec("max_comments", "最多获取评论数", kind="int", default=100, minimum=10, maximum=10000),
             ],
         )
+
+        limit_time_combo = self.widgets["limit_time"]
+        limit_time_combo.currentTextChanged.connect(self._on_limit_time_changed)
+        
+        get_comments_combo = self.widgets["get_comments"]
+        get_comments_combo.currentTextChanged.connect(self._on_get_comments_changed)
+        
+        self._on_limit_time_changed(limit_time_combo.currentText())
+        self._on_get_comments_changed(get_comments_combo.currentText())
+
+    def _set_field_visible(self, field_name: str, visible: bool):
+        widget = self.widgets.get(field_name)
+        if not widget:
+            return
+        widget.setVisible(visible)
+        form = self.layout().itemAt(0).layout()
+        label = form.labelForField(widget)
+        if label:
+            label.setVisible(visible)
+
+    def _on_limit_time_changed(self, text: str):
+        visible = (text == "是")
+        self._set_field_visible("start_date", visible)
+        self._set_field_visible("end_date", visible)
+        
+    def _on_get_comments_changed(self, text: str):
+        visible = (text == "是")
+        self._set_field_visible("max_comments", visible)
 
     def validate_values(self, values):
         from src.platforms.tiktok.profile_videos import parse_date_range
 
         if not Path(values["txt_path"]).exists():
             raise ValueError("TXT 文件不存在。")
-        parse_date_range(values["start_date"], values["end_date"])
+        if values.get("limit_time") == "是":
+            parse_date_range(values["start_date"], values["end_date"])
 
     def run_task(self, values, log_callback, finish_callback, stop_event):
         from src.platforms.tiktok.profile_videos import run_tiktok_profile_videos_spider
@@ -92,6 +126,11 @@ class TikTokProfileVideosWindow(SimpleToolWindow):
             values["txt_path"],
             values["start_date"],
             values["end_date"],
+            values["limit_time"],
+            int(values["max_scrolls"]),
+            values["get_video_info"],
+            values["get_comments"],
+            int(values["max_comments"]),
             DEFAULT_TIKTOK_CDP_URL,
             log_callback,
             finish_callback,

@@ -17,7 +17,7 @@ from src.core.output import build_output_path, get_output_root, get_platform_out
 from src.core.timing import interruptible_sleep, random_cooldown, should_stop
 from src.core.number_format import expand_compact_number
 from src.core.csv_utils import sanitize_csv_cell, sanitize_csv_row, sanitize_csv_rows
-from src.core.xlsx import XlsxRowWriter, sanitize_xlsx_cell, write_xlsx_rows
+from src.core.xlsx import XlsxRowWriter, sanitize_xlsx_cell, write_xlsx_rows, MultiSheetXlsxWriter
 
 __all__ = [
     "DEFAULT_TIKTOK_CDP_URL",
@@ -45,4 +45,5 @@ __all__ = [
     "sanitize_xlsx_cell",
     "write_xlsx_rows",
     "XlsxRowWriter",
+    "MultiSheetXlsxWriter",
 ]
