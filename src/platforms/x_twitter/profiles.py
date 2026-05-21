@@ -17,6 +17,7 @@ from src.core import (
 )
 
 OUTPUT_FIELDS = ["推文链接", "作者主页链接", "作者的名称", "账号ID", "粉丝数"]
+OUTPUT_FIELDS_PROFILE_MODE = ["作者主页链接", "作者的名称", "账号ID", "粉丝数"]
 PAGE_LOAD_TIMEOUT = 45000
 STATUS_RE = re.compile(r"/status/(\d+)")
 TWEET_READY_TIMEOUT = 12000
@@ -43,6 +44,18 @@ def parse_tweet_links(txt_path: str) -> list[str]:
                 continue
             url = normalize_x_url(stripped.split()[0])
             if "/status/" in url:
+                links.append(url)
+    return links
+
+def parse_profile_links(txt_path: str) -> list[str]:
+    links: list[str] = []
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            url = normalize_x_url(stripped.split()[0])
+            if url and "/status/" not in url:
                 links.append(url)
     return links
 
@@ -235,23 +248,70 @@ def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_ca
         "_view_value": view_value,
     }
 
-def output_row(record: dict) -> dict:
-    return {field: record.get(field, "") for field in OUTPUT_FIELDS}
+def extract_profile_record(profile_page, profile_url: str, log_callback) -> dict | None:
+    """Extract profile info directly from profile URL."""
+    profile_url = normalize_x_url(profile_url)
+    try:
+        profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+        time.sleep(3)
+    except Exception as e:
+        log_callback(f"跳过：无法加载主页：{profile_url}，错误：{e}")
+        return None
+
+    # Extract account ID from URL
+    account_match = re.search(r"x\.com/([^/?#]+)/?$", profile_url)
+    if not account_match:
+        log_callback(f"跳过：无法解析账号 ID：{profile_url}")
+        return None
+    account_id = account_match.group(1)
+
+    # Extract author name from profile header
+    author_name = ""
+    try:
+        name_selector = 'div[data-testid="profile_header_0"] div[dir="auto"] span'
+        name_locator = profile_page.locator(name_selector)
+        if name_locator.count() > 0:
+            author_name = name_locator.first.inner_text(timeout=2000).strip() or ""
+    except Exception:
+        pass
+
+    # Extract followers count
+    followers = extract_followers_count(profile_page, profile_url)
+
+    return {
+        "作者主页链接": profile_url,
+        "作者的名称": author_name,
+        "账号ID": account_id,
+        "粉丝数": followers,
+    }
+
+def output_row(record: dict, fields: list[str]) -> dict:
+    return {field: record.get(field, "") for field in fields}
 
 
-def update_writer_row(writer: XlsxRowWriter, row_number: int, record: dict) -> None:
-    row = output_row(record)
-    for column_number, field in enumerate(OUTPUT_FIELDS, start=1):
+def update_writer_row(writer: XlsxRowWriter, row_number: int, record: dict, fields: list[str]) -> None:
+    row = output_row(record, fields)
+    for column_number, field in enumerate(fields, start=1):
         writer.worksheet.cell(row=row_number, column=column_number).value = sanitize_xlsx_cell(row.get(field, ""))
     writer.save()
 
-def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None):
+def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None):
     output_path = None
     try:
-        tweet_links = parse_tweet_links(txt_path)
-        if not tweet_links:
-            log_callback("TXT 中没有有效的推文链接。")
-            return
+        is_profile_mode = input_mode == "博主链接"
+        
+        if is_profile_mode:
+            links = parse_profile_links(txt_path)
+            output_fields = OUTPUT_FIELDS_PROFILE_MODE
+            if not links:
+                log_callback("TXT 中没有有效的博主链接。")
+                return
+        else:
+            links = parse_tweet_links(txt_path)
+            output_fields = OUTPUT_FIELDS
+            if not links:
+                log_callback("TXT 中没有有效的推文链接。")
+                return
 
         with sync_playwright() as p:
             log_callback("正在连接本地 Chrome...")
@@ -264,36 +324,49 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
             tweet_page = context.new_page()
             profile_page = context.new_page()
             output_path = build_output_path("x", f"x_tweet_author_profiles_{time.strftime('%Y%m%d')}.xlsx")
-            writer = XlsxRowWriter(output_path, OUTPUT_FIELDS)
+            writer = XlsxRowWriter(output_path, output_fields)
             best_by_author: dict[str, dict] = {}
             row_by_author: dict[str, int] = {}
             written_count = 0
 
-            for index, tweet_url in enumerate(tweet_links, 1):
+            for index, link in enumerate(links, 1):
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
                     break
-                log_callback(f"[{index}/{len(tweet_links)}] 处理推文：{tweet_url}")
-                record = extract_tweet_author_record(tweet_page, profile_page, tweet_url, log_callback)
+                
+                if is_profile_mode:
+                    log_callback(f"[{index}/{len(links)}] 处理博主链接：{link}")
+                    record = extract_profile_record(profile_page, link, log_callback)
+                else:
+                    log_callback(f"[{index}/{len(links)}] 处理推文：{link}")
+                    record = extract_tweet_author_record(tweet_page, profile_page, link, log_callback)
+                
                 if not record:
                     continue
 
                 account_key = record["账号ID"].lower()
                 old_record = best_by_author.get(account_key)
                 if old_record is None:
-                    writer.writerow(output_row(record))
+                    writer.writerow(output_row(record, output_fields))
                     best_by_author[account_key] = record
                     row_by_author[account_key] = writer.worksheet.max_row
                     written_count += 1
-                    log_callback(f"  写入作者 {account_key or '未知'}，当前推文浏览量 {record.get('_view_text') or '未知'}。")
-                elif record["_view_value"] > old_record.get("_view_value", 0):
+                    if is_profile_mode:
+                        log_callback(f"  写入作者 {account_key or '未知'}。")
+                    else:
+                        log_callback(f"  写入作者 {account_key or '未知'}，当前推文浏览量 {record.get('_view_text') or '未知'}。")
+                elif not is_profile_mode and record["_view_value"] > old_record.get("_view_value", 0):
                     best_by_author[account_key] = record
-                    update_writer_row(writer, row_by_author[account_key], record)
+                    update_writer_row(writer, row_by_author[account_key], record, output_fields)
                     log_callback(
                         f"  更新作者 {record['账号ID']}：更高浏览量 {record.get('_view_text') or '未知'}。"
                     )
                 else:
-                    log_callback(f"  跳过：作者 {record['账号ID']} 已有更高浏览量推文。")
+                    if is_profile_mode:
+                        log_callback(f"  跳过：作者 {record['账号ID']} 已处理过。")
+                    else:
+                        log_callback(f"  跳过：作者 {record['账号ID']} 已有更高浏览量推文。")
+                
                 if index % 10 == 0:
                     if random_cooldown(log_callback, stop_event, 3.0, 8.0):
                         break

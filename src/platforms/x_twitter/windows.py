@@ -71,7 +71,16 @@ class XProfilesWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(
             "X 推文作者资料提取",
-            [FieldSpec("txt_path", "推文链接 TXT", kind="file", required=True)],
+            [
+                FieldSpec(
+                    "input_mode",
+                    "输入方式",
+                    kind="combo",
+                    default="推文链接",
+                    options=("推文链接", "博主链接"),
+                ),
+                FieldSpec("txt_path", "TXT 文件", kind="file", required=True),
+            ],
         )
 
     def validate_values(self, values):
@@ -81,7 +90,14 @@ class XProfilesWindow(SimpleToolWindow):
     def run_task(self, values, log_callback, finish_callback, stop_event):
         from src.platforms.x_twitter.profiles import run_scraper
 
-        return run_scraper(values["txt_path"], DEFAULT_X_CDP_URL, log_callback, finish_callback, stop_event)
+        return run_scraper(
+            values["txt_path"],
+            values["input_mode"],
+            DEFAULT_X_CDP_URL,
+            log_callback,
+            finish_callback,
+            stop_event,
+        )
 
 
 class XContextWindow(SimpleToolWindow):
