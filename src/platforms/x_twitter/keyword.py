@@ -10,14 +10,17 @@ from playwright.sync_api import sync_playwright
 
 from src.core import (
     XlsxRowWriter,
+    MultiSheetXlsxWriter,
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
     interruptible_sleep,
     random_cooldown,
+    sanitize_csv_row,
     sanitize_csv_rows,
     should_stop,
 )
+from src.platforms.x_twitter.comments import extract_comments
 
 MAX_SEARCH_SCROLLS = 30
 STATUS_PATH_RE = re.compile(r"(/[^/]+/status/\d+)")
@@ -173,10 +176,15 @@ def should_keep_article(article) -> bool:
         return False
     return True
 
-def append_rows(writer: XlsxRowWriter, rows: list[dict]):
+def append_rows(writer, rows: list[dict], sheet_name: str = "推文信息"):
     if not rows:
         return
-    writer.writerows(sanitize_csv_rows(rows))
+    sanitized = sanitize_csv_rows(rows)
+    if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
+        for row in sanitized:
+            writer.writerow(sheet_name, row)
+    else:
+        writer.writerows(sanitized)
 
 def build_search_query(base_keyword: str, adv_params: dict, since: str, until: str) -> str:
     query_parts = [base_keyword]
@@ -186,8 +194,9 @@ def build_search_query(base_keyword: str, adv_params: dict, since: str, until: s
         query_parts.append(f"min_faves:{adv_params['min_faves']}")
     if adv_params["min_replies"]:
         query_parts.append(f"min_replies:{adv_params['min_replies']}")
-    query_parts.append(f"since:{since}")
-    query_parts.append(f"until:{until}")
+    if since and until:
+        query_parts.append(f"since:{since}")
+        query_parts.append(f"until:{until}")
     return " ".join(query_parts)
 
 def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback, stop_event=None):
@@ -201,8 +210,14 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                 finish_callback()
                 return
 
-            page = context.new_page()
+            search_page = context.new_page()
+            detail_page = context.new_page()
             log_callback("已接管浏览器。过滤规则：跳过转推、跳过引用/嵌套推文，保留含视频或图片的原创推文。\n")
+
+            limit_time_bool = adv_params.get("limit_time") == "是"
+            get_comments_bool = adv_params.get("get_comments") == "是"
+            max_comments = int(adv_params.get("max_comments", 500))
+            max_search_scrolls = int(adv_params.get("max_scrolls", MAX_SEARCH_SCROLLS))
 
             for base_keyword in keywords_list:
                 if should_stop(stop_event):
@@ -210,44 +225,61 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                     break
                 safe_filename = re.sub(r'[\\/*?:"<>|]', "", base_keyword)
                 output_path = build_output_path("x", f"X_Media_Tweets_{safe_filename}_{time.strftime('%Y%m%d')}.xlsx")
-                writer = XlsxRowWriter(output_path, CSV_FIELDS)
+                
+                if get_comments_bool:
+                    comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
+                    writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields})
+                else:
+                    writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
                 log_callback(f"\n{'=' * 50}")
                 log_callback(f"开始关键词：{base_keyword}")
                 log_callback(f"输出文件：{output_path}")
 
-                try:
-                    start_dt = datetime.strptime(adv_params["start_date"], "%Y-%m-%d")
-                    end_dt = datetime.strptime(adv_params["end_date"], "%Y-%m-%d") + timedelta(days=1)
-                    slice_days = int(adv_params["slice_days"])
-                except ValueError:
-                    log_callback("日期或切片格式错误：日期必须是 YYYY-MM-DD，切片天数必须是整数。")
-                    continue
+                if limit_time_bool:
+                    try:
+                        start_dt = datetime.strptime(adv_params["start_date"], "%Y-%m-%d")
+                        end_dt = datetime.strptime(adv_params["end_date"], "%Y-%m-%d") + timedelta(days=1)
+                        slice_days = int(adv_params["slice_days"])
+                    except ValueError:
+                        log_callback("日期或切片格式错误：日期必须是 YYYY-MM-DD，切片天数必须是整数。")
+                        continue
 
-                if start_dt >= end_dt:
-                    log_callback("起始日期必须早于结束日期。")
-                    continue
+                    if start_dt >= end_dt:
+                        log_callback("起始日期必须早于结束日期。")
+                        continue
+                else:
+                    start_dt = datetime.now()
+                    end_dt = datetime.now()
+                    slice_days = 1
 
                 seen_urls = set()
                 total_count = 0
                 current_end_dt = end_dt
                 slice_index = 1
 
-                while current_end_dt > start_dt:
+                while (limit_time_bool and current_end_dt > start_dt) or (not limit_time_bool and slice_index == 1):
                     if should_stop(stop_event):
                         log_callback("已请求停止，结束当前关键词。")
                         break
-                    current_start_dt = max(start_dt, current_end_dt - timedelta(days=slice_days))
-                    since = current_start_dt.strftime("%Y-%m-%d")
-                    until = current_end_dt.strftime("%Y-%m-%d")
+                        
+                    if limit_time_bool:
+                        current_start_dt = max(start_dt, current_end_dt - timedelta(days=slice_days))
+                        since = current_start_dt.strftime("%Y-%m-%d")
+                        until = current_end_dt.strftime("%Y-%m-%d")
+                        log_callback(f"\n[切片 {slice_index}] {since} 至 {until}")
+                    else:
+                        since = ""
+                        until = ""
+                        log_callback("\n[搜索] 不限时间")
+                        
                     final_query = build_search_query(base_keyword, adv_params, since, until)
                     search_url = f"https://x.com/search?q={urllib.parse.quote(final_query)}&src=typed_query&f=top"
 
-                    log_callback(f"\n[切片 {slice_index}] {since} 至 {until}")
                     log_callback(f"搜索语法：{final_query}")
 
                     try:
-                        page.goto(search_url, wait_until="domcontentloaded", timeout=40000)
+                        search_page.goto(search_url, wait_until="domcontentloaded", timeout=40000)
                     except Exception:
                         log_callback("页面加载超时，继续尝试提取当前已加载内容。")
 
@@ -258,11 +290,11 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                     no_change_strikes = 0
                     buffer_rows: list[dict] = []
 
-                    for _ in range(MAX_SEARCH_SCROLLS):
+                    for _ in range(max_search_scrolls):
                         if should_stop(stop_event):
                             break
                         try:
-                            retry_btn = page.locator(
+                            retry_btn = search_page.locator(
                                 "button:has-text('Retry'), button:has-text('重试'), button:has-text('再試行')"
                             ).first
                             if retry_btn.count() > 0:
@@ -272,7 +304,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                         except Exception:
                             pass
 
-                        for article in page.locator('article[data-testid="tweet"]').all():
+                        for article in search_page.locator('article[data-testid="tweet"]').all():
                             if should_stop(stop_event):
                                 break
                             try:
@@ -299,6 +331,24 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                                 buffer_rows.append(row)
                                 total_count += 1
                                 slice_count += 1
+                                
+                                if get_comments_bool:
+                                    try:
+                                        detail_page.goto(tweet_url, wait_until="domcontentloaded", timeout=30000)
+                                        detail_page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
+                                        time.sleep(2)
+                                        comments = extract_comments(detail_page, tweet_url, max_comments, log_callback, stop_event)
+                                        for comment in comments:
+                                            comment_row = {
+                                                "序号": row["序号"],
+                                                "推文链接": tweet_url,
+                                                "评论的点赞量": comment.get("likes", ""),
+                                                "评论内容": comment.get("content", ""),
+                                                "评论发布时间": comment.get("time", "")
+                                            }
+                                            writer.writerow("评论信息", sanitize_csv_row(comment_row))
+                                    except Exception as exc:
+                                        log_callback(f"    提取评论失败：{exc}")
 
                                 if len(buffer_rows) >= 5:
                                     append_rows(writer, buffer_rows)
@@ -322,7 +372,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                             no_change_strikes = 0
                         previous_count = slice_count
 
-                        page.mouse.wheel(delta_x=0, delta_y=random.randint(900, 1400))
+                        search_page.mouse.wheel(delta_x=0, delta_y=random.randint(900, 1400))
                         if interruptible_sleep(random.uniform(3.0, 5.0), stop_event):
                             break
 
@@ -333,8 +383,9 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                 log_callback(f"关键词完成：{base_keyword}，累计 {total_count} 条。")
                 writer.save()
 
-            if not page.is_closed():
-                page.close()
+            for opened_page in (search_page, detail_page):
+                if not opened_page.is_closed():
+                    opened_page.close()
             log_callback("\nX 关键词媒体推文搜索任务结束。")
             finish_callback()
     except Exception as e:

@@ -29,18 +29,25 @@ class XKeywordWindow(SimpleToolWindow):
                 ),
                 FieldSpec("min_faves", "最低点赞量"),
                 FieldSpec("min_replies", "最低评论量"),
-                FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE, required=True),
-                FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE, required=True),
+                FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="是"),
+                FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
+                FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
                 FieldSpec("slice_days", "切片跨度（天）", kind="int", default=7, minimum=1, maximum=365),
+                FieldSpec("max_scrolls", "每个时间切片最大滚动次数", kind="int", default=30, minimum=1, maximum=999999),
+                FieldSpec("get_comments", "是否获取推文评论信息？", kind="combo", options=("是", "否"), default="否"),
+                FieldSpec("max_comments", "最多获取评论数", kind="int", default=500, minimum=10, maximum=10000),
             ],
-            height=620,
+            height=720,
         )
+        self.bind_field_visibility("limit_time", "是", ["start_date", "end_date", "slice_days"])
+        self.bind_field_visibility("get_comments", "是", ["max_comments"])
 
     def validate_values(self, values):
         if not _lines(values["keywords"]):
             raise ValueError("至少需要输入一个关键词。")
-        if not values["start_date"] or not values["end_date"]:
-            raise ValueError("开始日期和结束日期不能为空。")
+        if values.get("limit_time") == "是":
+            if not values.get("start_date") or not values.get("end_date"):
+                raise ValueError("开始日期和结束日期不能为空。")
 
     def run_task(self, values, log_callback, finish_callback, stop_event):
         from src.platforms.x_twitter.keyword import run_x_spider
@@ -60,9 +67,13 @@ class XKeywordWindow(SimpleToolWindow):
             "lang": lang_map.get(values["lang"], "any"),
             "min_faves": values["min_faves"],
             "min_replies": values["min_replies"],
+            "limit_time": values["limit_time"],
             "start_date": values["start_date"],
             "end_date": values["end_date"],
-            "slice_days": str(values["slice_days"]),
+            "slice_days": str(values.get("slice_days", 7)),
+            "max_scrolls": int(values["max_scrolls"]),
+            "get_comments": values["get_comments"],
+            "max_comments": int(values["max_comments"]),
         }
         return run_x_spider(_lines(values["keywords"]), adv_params, debug_port_from_cdp_url(DEFAULT_X_CDP_URL), log_callback, finish_callback, stop_event)
 
@@ -121,8 +132,13 @@ class XTweetMetricsWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(
             "X 指定推文指标采集",
-            [FieldSpec("txt_path", "推文链接 TXT", kind="file", required=True)],
+            [
+                FieldSpec("txt_path", "推文链接 TXT", kind="file", required=True),
+                FieldSpec("get_comments", "是否获取推文评论信息？", kind="combo", options=("是", "否"), default="否"),
+                FieldSpec("max_comments", "最多获取评论数", kind="int", default=500, minimum=10, maximum=10000),
+            ],
         )
+        self.bind_field_visibility("get_comments", "是", ["max_comments"])
 
     def validate_values(self, values):
         if not Path(values["txt_path"]).exists():
@@ -131,7 +147,7 @@ class XTweetMetricsWindow(SimpleToolWindow):
     def run_task(self, values, log_callback, finish_callback, stop_event):
         from src.platforms.x_twitter.tweet_metrics import run_x_tweet_metrics_spider
 
-        return run_x_tweet_metrics_spider(values["txt_path"], DEFAULT_X_CDP_URL, log_callback, finish_callback, stop_event)
+        return run_x_tweet_metrics_spider(values["txt_path"], values["get_comments"], int(values["max_comments"]), DEFAULT_X_CDP_URL, log_callback, finish_callback, stop_event)
 
 
 class XProfileTweetsWindow(SimpleToolWindow):
@@ -147,8 +163,16 @@ class XProfileTweetsWindow(SimpleToolWindow):
                     required=True,
                 ),
                 FieldSpec("max_scrolls", "每个主页最大滚动次数", kind="int", default=300, minimum=1, maximum=5000),
+                FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="否"),
+                FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
+                FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
+                FieldSpec("get_comments", "是否获取推文评论信息？", kind="combo", options=("是", "否"), default="否"),
+                FieldSpec("max_comments", "最多获取评论数", kind="int", default=500, minimum=10, maximum=10000),
             ],
+            height=660,
         )
+        self.bind_field_visibility("limit_time", "是", ["start_date", "end_date"])
+        self.bind_field_visibility("get_comments", "是", ["max_comments"])
 
     def validate_values(self, values):
         if not _lines(values["profile_urls"]):
@@ -159,6 +183,11 @@ class XProfileTweetsWindow(SimpleToolWindow):
 
         return run_x_profile_tweets_spider(
             values["profile_urls"],
+            values["limit_time"],
+            values["start_date"],
+            values["end_date"],
+            values["get_comments"],
+            int(values["max_comments"]),
             DEFAULT_X_CDP_URL,
             int(values["max_scrolls"]),
             log_callback,

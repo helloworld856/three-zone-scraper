@@ -290,7 +290,7 @@ class Video(Base):
         }
 
         while count is None or amount_yielded < count:
-            self.parent.logger.debug(f"Making TikTok-Api request for related videos")
+            self.parent.logger.debug("Making TikTok-Api request for related videos")
             try:
                 res = await self.parent.tiktok_api.make_request(
                     url="https://www.tiktok.com/api/related/item_list/",
@@ -699,7 +699,7 @@ class Video(Base):
 
             if len(data_responses) == 0:
                 if tries > 5:
-                    logger.debug(f"Not sending anymore!")
+                    logger.debug("Not sending anymore!")
                     break
                 tries += 1
 
@@ -734,7 +734,7 @@ class Video(Base):
                             "TikTok isn't sending more TikToks beyond this point."
                         )
                         return
-                except Exception as e:
+                except Exception:
                     processed_urls.append(data_response.get('url', ''))
 
     async def _get_comments_via_requests(self, count, cursor, data_request):

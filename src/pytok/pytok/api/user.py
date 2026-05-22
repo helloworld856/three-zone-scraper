@@ -161,7 +161,7 @@ class User(Base):
 
         self.parent.logger.debug(f"Loading page: {url}")
         await page.send(cdp.page.navigate(url))
-        self.parent.logger.debug(f"Navigate sent, waiting for ready state")
+        self.parent.logger.debug("Navigate sent, waiting for ready state")
         async with asyncio.timeout(10):
             await page.wait_for_ready_state(until='complete', timeout=11)
         await asyncio.sleep(3)  # Brief wait for dynamic content
@@ -241,10 +241,10 @@ class User(Base):
                     return
 
             if finished:
-                self.parent.logger.info(f"Finished after initial videos")
+                self.parent.logger.info("Finished after initial videos")
                 return
 
-            self.parent.logger.info(f"Continuing with _get_videos_api to get more videos")
+            self.parent.logger.info("Continuing with _get_videos_api to get more videos")
 
         remaining = None if count is None else count - amount_yielded
         try:
@@ -329,11 +329,11 @@ class User(Base):
         url = f"https://www.tiktok.com/@{self.username}"
         self.parent.logger.debug(f"Loading page: {url}")
         await page.send(cdp.page.navigate(url))
-        self.parent.logger.debug(f"Navigate sent, waiting for ready state")
+        self.parent.logger.debug("Navigate sent, waiting for ready state")
         async with asyncio.timeout(30):
             await page.wait_for_ready_state(until='complete', timeout=31)
         await asyncio.sleep(3)  # Brief wait for dynamic content
-        self.parent.logger.debug(f"Page loaded for scraping videos")
+        self.parent.logger.debug("Page loaded for scraping videos")
 
         # Process any pending responses
         await self.parent.process_pending_responses()

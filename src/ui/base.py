@@ -180,11 +180,35 @@ class SimpleToolWindow(QWidget):
                 value = widget.path_edit.text().strip()
             else:
                 value = widget.text().strip()
-            if field.required and not value:
+            if field.required and not value and widget.isVisible():
                 QMessageBox.warning(self, "提示", f"请填写：{field.label}")
                 return None
             values[field.name] = value
         return values
+
+    def set_field_visible(self, field_name: str, visible: bool) -> None:
+        widget = self.widgets.get(field_name)
+        if not widget:
+            return
+        widget.setVisible(visible)
+        form = self.layout().itemAt(0).layout()
+        label = form.labelForField(widget)
+        if label:
+            label.setVisible(visible)
+
+    def bind_field_visibility(self, trigger_field: str, trigger_value: str, target_fields: list[str]) -> None:
+        combo = self.widgets.get(trigger_field)
+        if not isinstance(combo, QComboBox):
+            self.logger.warning("bind_field_visibility expects a QComboBox for %s", trigger_field)
+            return
+
+        def on_changed(text: str):
+            visible = (text == trigger_value)
+            for target in target_fields:
+                self.set_field_visible(target, visible)
+
+        combo.currentTextChanged.connect(on_changed)
+        on_changed(combo.currentText())
 
     def start(self) -> None:
         if self.worker_thread and self.worker_thread.is_alive():

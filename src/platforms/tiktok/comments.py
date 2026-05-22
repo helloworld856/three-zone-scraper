@@ -14,7 +14,6 @@ except ModuleNotFoundError:
     sync_playwright = None
 
 from src.core import (
-    DEFAULT_TIKTOK_CDP_URL,
     XlsxRowWriter,
     build_output_path,
     connect_existing_chromium,

@@ -1,5 +1,4 @@
 import asyncio
-import os
 
 from pytok.tiktok import PyTok
 

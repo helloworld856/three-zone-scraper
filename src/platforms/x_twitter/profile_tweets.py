@@ -15,11 +15,14 @@ except ModuleNotFoundError:
 from src.core import (
     DEFAULT_X_CDP_URL,
     XlsxRowWriter,
+    MultiSheetXlsxWriter,
     build_output_path,
     connect_existing_chromium,
     sanitize_csv_cell,
     should_stop,
 )
+from src.platforms.x_twitter.comments import extract_comments
+from src.platforms.tiktok.keyword import parse_date_range
 
 
 CSV_FIELDS = ["序号", "帖子ID", "发布时间", "帖子内容", "帖子链接"]
@@ -189,11 +192,17 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
 
 def collect_profile_tweets(
     page,
+    detail_page,
     profile_url: str,
     max_scrolls: int,
+    limit_time_bool: bool,
+    start_dt,
+    end_dt,
+    get_comments_bool: bool,
+    max_comments: int,
     log_callback,
     stop_event=None,
-    writer: XlsxRowWriter | None = None,
+    writer=None,
     row_offset: int = 0,
 ) -> list[dict[str, str]] | tuple[list[dict[str, str]], int, int]:
     username = extract_profile_username(profile_url)
@@ -224,13 +233,49 @@ def collect_profile_tweets(
                 continue
             seen_ids.add(post_id)
             normalized_tweet = normalize_tweet(tweet)
+            
+            if limit_time_bool:
+                pub_time = normalized_tweet.get("published_at")
+                if not pub_time:
+                    continue
+                try:
+                    pub_dt = datetime.strptime(pub_time, "%Y-%m-%d %H:%M:%S")
+                    if not (start_dt.date() <= pub_dt.date() <= end_dt.date()):
+                        continue
+                except Exception:
+                    continue
+                    
             tweets.append(normalized_tweet)
             added += 1
             if writer:
                 row_offset += 1
-                pending_rows.append(row_from_tweet(row_offset, normalized_tweet))
+                row = row_from_tweet(row_offset, normalized_tweet)
+                pending_rows.append(row)
+                
+                if get_comments_bool:
+                    try:
+                        detail_page.goto(normalized_tweet["url"], wait_until="domcontentloaded", timeout=30000)
+                        detail_page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
+                        time.sleep(2)
+                        comments = extract_comments(detail_page, normalized_tweet["url"], max_comments, log_callback, stop_event)
+                        for comment in comments:
+                            comment_row = {
+                                "序号": str(row_offset),
+                                "推文链接": normalized_tweet["url"],
+                                "评论的点赞量": comment.get("likes", ""),
+                                "评论内容": comment.get("content", ""),
+                                "评论发布时间": comment.get("time", "")
+                            }
+                            writer.writerow("评论信息", comment_row)
+                    except Exception as exc:
+                        log_line(log_callback, f"    提取评论失败：{exc}")
+                
                 if len(pending_rows) >= SAVE_BATCH_SIZE:
-                    writer.writerows(pending_rows)
+                    if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
+                        for r in pending_rows:
+                            writer.writerow("推文信息", r)
+                    else:
+                        writer.writerows(pending_rows)
                     writer.save()
                     written_count += len(pending_rows)
                     pending_rows.clear()
@@ -254,7 +299,11 @@ def collect_profile_tweets(
         time.sleep(SLOW_SCROLL_DELAY if no_new_count else SCROLL_DELAY)
 
     if writer and pending_rows:
-        writer.writerows(pending_rows)
+        if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
+            for r in pending_rows:
+                writer.writerow("推文信息", r)
+        else:
+            writer.writerows(pending_rows)
         writer.save()
         written_count += len(pending_rows)
         pending_rows.clear()
@@ -273,6 +322,11 @@ def build_rows(tweets: list[dict[str, str]]) -> list[dict[str, str]]:
 
 def run_x_profile_tweets_spider(
     profile_urls_text: str,
+    limit_time_str: str,
+    start_date: str,
+    end_date: str,
+    get_comments_str: str,
+    max_comments: int,
     cdp_port_or_url: str = DEFAULT_X_CDP_URL,
     max_scrolls: int = DEFAULT_MAX_SCROLLS,
     log_callback=None,
@@ -291,8 +345,21 @@ def run_x_profile_tweets_spider(
             log_line(log_callback, "未读取到有效的 X 博主主页链接。")
             return
 
+        limit_time_bool = limit_time_str == "是"
+        get_comments_bool = get_comments_str == "是"
+        start_dt, end_dt = None, None
+        if limit_time_bool:
+            start_dt, end_dt = parse_date_range(start_date, end_date)
+
+        max_comments_val = max(10, int(max_comments))
         output_path = build_output_path("x", f"x_profile_tweets_{time.strftime('%Y%m%d')}.xlsx")
-        writer = XlsxRowWriter(output_path, CSV_FIELDS)
+        
+        if get_comments_bool:
+            comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
+            writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields})
+        else:
+            writer = XlsxRowWriter(output_path, CSV_FIELDS)
+            
         row_offset = 0
 
         with sync_playwright() as playwright:
@@ -305,6 +372,7 @@ def run_x_profile_tweets_spider(
                 return
 
             page = context.new_page()
+            detail_page = context.new_page()
 
             for profile_index, profile_url in enumerate(profile_urls, 1):
                 if should_stop(stop_event):
@@ -316,8 +384,14 @@ def run_x_profile_tweets_spider(
                 try:
                     _, row_offset, written_count = collect_profile_tweets(
                         page,
+                        detail_page,
                         profile_url,
                         max_scrolls,
+                        limit_time_bool,
+                        start_dt,
+                        end_dt,
+                        get_comments_bool,
+                        max_comments_val,
                         log_callback,
                         stop_event,
                         writer=writer,
@@ -329,8 +403,9 @@ def run_x_profile_tweets_spider(
                 except Exception as exc:
                     log_line(log_callback, f"  跳过：{exc}")
 
-            if page and not page.is_closed():
-                page.close()
+            for opened_page in (page, detail_page):
+                if not opened_page.is_closed():
+                    opened_page.close()
 
         completed_path = output_path
         writer.save()

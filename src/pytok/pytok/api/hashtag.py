@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from .video import Video
 
 from .base import Base
-from ..helpers import edit_url, extract_tag_contents
+from ..helpers import edit_url
 from ..exceptions import *
 
 

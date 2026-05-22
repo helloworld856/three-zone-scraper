@@ -21,18 +21,24 @@ class TikTokKeywordWindow(SimpleToolWindow):
             [
                 FieldSpec("max_videos", "每个关键词最多视频数", kind="int", default=1000, minimum=1, maximum=5000),
                 FieldSpec("max_candidates", "每个关键词最多检查候选数", kind="int", default=3000, minimum=1, maximum=20000),
-                FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE, required=True),
-                FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE, required=True),
+                FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="是"),
+                FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
+                FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
                 FieldSpec("keywords", "关键词，每行一个", kind="multiline", required=True),
+                FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
+                FieldSpec("max_comments", "最多获取评论数", kind="int", default=100, minimum=10, maximum=10000),
             ],
         )
+        self.bind_field_visibility("limit_time", "是", ["start_date", "end_date"])
+        self.bind_field_visibility("get_comments", "是", ["max_comments"])
 
     def validate_values(self, values):
         from src.platforms.tiktok.keyword import parse_date_range
 
         if not _lines(values["keywords"]):
             raise ValueError("至少需要输入一个关键词。")
-        parse_date_range(values["start_date"], values["end_date"])
+        if values.get("limit_time") == "是":
+            parse_date_range(values["start_date"], values["end_date"])
 
     def run_task(self, values, log_callback, finish_callback, stop_event):
         from src.platforms.tiktok.keyword import run_tiktok_spider
@@ -41,8 +47,11 @@ class TikTokKeywordWindow(SimpleToolWindow):
             _lines(values["keywords"]),
             int(values["max_videos"]),
             int(values["max_candidates"]),
+            values["limit_time"],
             values["start_date"],
             values["end_date"],
+            values["get_comments"],
+            int(values["max_comments"]),
             DEFAULT_TIKTOK_CDP_URL,
             log_callback,
             finish_callback,
@@ -81,35 +90,10 @@ class TikTokProfileVideosWindow(SimpleToolWindow):
                 FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("max_comments", "最多获取评论数", kind="int", default=100, minimum=10, maximum=10000),
             ],
+            height=660,
         )
-
-        limit_time_combo = self.widgets["limit_time"]
-        limit_time_combo.currentTextChanged.connect(self._on_limit_time_changed)
-        
-        get_comments_combo = self.widgets["get_comments"]
-        get_comments_combo.currentTextChanged.connect(self._on_get_comments_changed)
-        
-        self._on_limit_time_changed(limit_time_combo.currentText())
-        self._on_get_comments_changed(get_comments_combo.currentText())
-
-    def _set_field_visible(self, field_name: str, visible: bool):
-        widget = self.widgets.get(field_name)
-        if not widget:
-            return
-        widget.setVisible(visible)
-        form = self.layout().itemAt(0).layout()
-        label = form.labelForField(widget)
-        if label:
-            label.setVisible(visible)
-
-    def _on_limit_time_changed(self, text: str):
-        visible = (text == "是")
-        self._set_field_visible("start_date", visible)
-        self._set_field_visible("end_date", visible)
-        
-    def _on_get_comments_changed(self, text: str):
-        visible = (text == "是")
-        self._set_field_visible("max_comments", visible)
+        self.bind_field_visibility("limit_time", "是", ["start_date", "end_date"])
+        self.bind_field_visibility("get_comments", "是", ["max_comments"])
 
     def validate_values(self, values):
         from src.platforms.tiktok.profile_videos import parse_date_range

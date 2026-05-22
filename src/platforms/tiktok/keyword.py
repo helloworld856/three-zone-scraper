@@ -11,8 +11,8 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright
 
 from src.core import (
-    DEFAULT_TIKTOK_CDP_URL,
     XlsxRowWriter,
+    MultiSheetXlsxWriter,
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
@@ -22,6 +22,7 @@ from src.core import (
     sanitize_csv_row,
     should_stop,
 )
+from src.platforms.tiktok.comments import collect_video_comments
 
 CSV_FIELDS = [
     "搜索词",
@@ -364,11 +365,16 @@ def extract_video_row(page, keyword: str, video_url: str, play_count: str = "") 
         "博主主页链接": extract_author_url(video_url),
     }
 
-def run_tiktok_spider(keywords_list, max_videos, max_candidates, start_date, end_date, cdp_port_or_url, log_callback, finish_callback, stop_event=None):
+def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str, start_date, end_date, get_comments_str, max_comments, cdp_port_or_url, log_callback, finish_callback, stop_event=None):
     output_path = None
     output_paths: list[str] = []
     try:
-        start_dt, end_dt = parse_date_range(start_date, end_date)
+        limit_time_bool = limit_time_str == "是"
+        get_comments_bool = get_comments_str == "是"
+        start_dt, end_dt = None, None
+        if limit_time_bool:
+            start_dt, end_dt = parse_date_range(start_date, end_date)
+        
         with sync_playwright() as p:
             log_callback("正在连接本地 Chrome...")
             try:
@@ -392,9 +398,15 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, start_date, end
                 output_paths.append(output_path)
                 log_callback(f"[{index}/{len(keywords_list)}] 搜索关键词：{keyword}")
                 log_callback(f"  输出文件：{output_path}")
-                log_callback(f"  日期范围：{start_date} 至 {end_date}")
+                if limit_time_bool:
+                    log_callback(f"  日期范围：{start_date} 至 {end_date}")
 
-                writer = XlsxRowWriter(output_path, CSV_FIELDS)
+                if get_comments_bool:
+                    comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
+                    writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields})
+                else:
+                    writer = XlsxRowWriter(output_path, CSV_FIELDS)
+                    
                 serial_number = 1
 
                 open_search_page(search_page, keyword)
@@ -427,12 +439,30 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, start_date, end
                             video_url = video_item["视频链接"]
                             log_callback(f"  [候选{scanned_count}/已写{written_count}] {video_url}")
                             row = extract_video_row(detail_page, keyword, video_url, video_item.get("播放量", ""))
-                            if not in_date_range(row["发布时间"], start_dt, end_dt):
-                                log_callback(f"    跳过：发布时间不在范围内（{row['发布时间'] or '未解析'}）")
-                                continue
+                            
+                            if limit_time_bool:
+                                if not in_date_range(row["发布时间"], start_dt, end_dt):
+                                    log_callback(f"    跳过：发布时间不在范围内（{row['发布时间'] or '未解析'}）")
+                                    continue
+                                    
                             row["序号"] = str(serial_number)
+                            
+                            if get_comments_bool:
+                                comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event)
+                                writer.writerow("视频信息", sanitize_csv_row(row))
+                                for comment in comments:
+                                    comment_row = {
+                                        "序号": str(serial_number),
+                                        "视频链接": video_url,
+                                        "评论的点赞量": comment.get("like_count", ""),
+                                        "评论内容": comment.get("text", ""),
+                                        "发布时间": comment.get("create_time", "")
+                                    }
+                                    writer.writerow("评论信息", sanitize_csv_row(comment_row))
+                            else:
+                                writer.writerow(sanitize_csv_row(row))
+                                
                             serial_number += 1
-                            writer.writerow(sanitize_csv_row(row))
                             written_count += 1
                         except Exception as exc:
                             log_callback(f"    跳过：{exc}")
