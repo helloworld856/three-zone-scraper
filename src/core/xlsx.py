@@ -64,3 +64,47 @@ def write_xlsx_rows(output_path: str, fieldnames: Iterable[str], rows: Iterable[
     writer = XlsxRowWriter(output_path, fieldnames, sheet_name=sheet_name)
     writer.writerows(rows)
     writer.save()
+
+
+class MultiSheetXlsxWriter:
+    def __init__(
+        self,
+        output_path: str,
+        sheets_fields: dict[str, list[str]],
+        autosave_every: int = 1,
+    ):
+        self.output_path = str(output_path)
+        Path(self.output_path).parent.mkdir(parents=True, exist_ok=True)
+        self.sheets_fields = sheets_fields
+        self.autosave_every = max(1, int(autosave_every or 1))
+        self._rows_since_save = 0
+        
+        self.workbook = Workbook()
+        # Remove default sheet created by openpyxl
+        default_sheet = self.workbook.active
+        if default_sheet is not None:
+            self.workbook.remove(default_sheet)
+            
+        self.worksheets = {}
+        for sheet_name, fieldnames in sheets_fields.items():
+            ws = self.workbook.create_sheet(title=sheet_name[:31] or "Sheet")
+            ws.append(list(fieldnames))
+            self.worksheets[sheet_name] = ws
+        self.save()
+
+    def writerow(self, sheet_name: str, row: Mapping[str, Any]):
+        if sheet_name not in self.worksheets:
+            return
+        fieldnames = self.sheets_fields[sheet_name]
+        ws = self.worksheets[sheet_name]
+        ws.append([sanitize_xlsx_cell(row.get(field, "")) for field in fieldnames])
+        self._rows_since_save += 1
+        if self._rows_since_save >= self.autosave_every:
+            self.save()
+
+    def save(self):
+        temp_path = f"{self.output_path}.tmp"
+        self.workbook.save(temp_path)
+        os.replace(temp_path, self.output_path)
+        self._rows_since_save = 0
+
