@@ -20,7 +20,7 @@ python main.py
 python -m src.studio.tool_runner --tool-id <tool_id>
 
 # List available tool IDs
-python -m src.studio.tool_runner --tool-id <id> --check
+python -m src.studio.tool_runner --tool-id <tool_id> --check
 
 # Lint
 ruff check .
@@ -28,8 +28,11 @@ ruff check .
 # Run UI logic tests (also run by CI)
 python test/test_visibility.py
 
-# Run pause state machine tests
+# Run pause state machine tests (requires pytest: pip install pytest)
 python -m pytest test/test_pause_state_machine.py -v
+
+# Run TikTok profile scraping tests
+python test/test_tiktok_profile.py
 ```
 
 ### All tool IDs (from `src/studio/registry.py`)
@@ -79,6 +82,8 @@ YouTube tools require a **Google API key** (field `api_key`). TikTok, X/Twitter,
 | `csv_utils.py` | `sanitize_csv_cell` — strips newlines from cell values for CSV/XLSX compatibility |
 | `number_format.py` | `expand_compact_number` — converts "1.2K" → "1200", handles CJK units (万/亿) |
 | `timing.py` | `should_stop`, `interruptible_sleep`, `random_cooldown`, `wait_if_paused` — cooperative stop/pause-event checks that every scraper must call in its inner loops |
+
+`src/studio/base.py` defines `ToolSpec` (dataclass: `tool_id`, `name`, `category`, `summary`, `entrypoint`, `implementation_path`, `tags`) and `load_object(dotted_path)` which imports and returns a class/factory from a dotted string path. Both are used by `registry.py` and `tool_runner.py`.
 
 ### UI layer (`src/ui/base.py` + `src/ui/config_dialog.py`)
 
