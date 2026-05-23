@@ -486,7 +486,7 @@ def test_text_or_file_e2e_tempfile_content_matches_input():
         assert content == test_text
         # Verify backend reading works with same encoding used by all parse functions
         with open(temp_path, "r", encoding="utf-8-sig") as f:
-            lines = [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
+            lines = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
         assert len(lines) == 2
         assert lines[0] == "https://x.com/user/status/123"
         assert lines[1] == "https://twitter.com/other/status/456"
