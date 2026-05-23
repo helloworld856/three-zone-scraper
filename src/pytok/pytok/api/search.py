@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import json
-import time
-from typing import TYPE_CHECKING, Iterator, Type
-from urllib.parse import urlencode
+from typing import TYPE_CHECKING, Iterator
 import re
 
 from .user import User
-from .hashtag import Hashtag
 from .video import Video
 from .base import Base
 from ..exceptions import *

@@ -13,12 +13,14 @@ except ModuleNotFoundError:
 from src.core import (
     DEFAULT_X_CDP_URL,
     XlsxRowWriter,
+    MultiSheetXlsxWriter,
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
     random_cooldown,
     should_stop,
 )
+from src.platforms.x_twitter.comments import extract_comments
 
 
 CSV_FIELDS = ["序号", "推文链接", "推文的内容", "浏览量", "评论数", "点赞数", "转发量"]
@@ -187,6 +189,8 @@ def collect_tweet_metrics(page, tweet_url: str) -> dict[str, str]:
 
 def run_x_tweet_metrics_spider(
     txt_path: str,
+    get_comments_str: str,
+    max_comments: int,
     cdp_port_or_url: str = DEFAULT_X_CDP_URL,
     log_callback=None,
     finish_callback=None,
@@ -204,8 +208,15 @@ def run_x_tweet_metrics_spider(
             log_line(log_callback, "TXT 中没有有效的推文链接。")
             return
 
+        get_comments_bool = get_comments_str == "是"
+        max_comments_val = max(10, int(max_comments))
+
         output_path = build_output_path("x", f"x_tweet_metrics_{time.strftime('%Y%m%d')}.xlsx")
-        writer = XlsxRowWriter(output_path, CSV_FIELDS)
+        if get_comments_bool:
+            comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
+            writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields})
+        else:
+            writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
         with sync_playwright() as playwright:
             log_line(log_callback, "正在连接本地 Chrome...")
@@ -235,12 +246,31 @@ def run_x_tweet_metrics_spider(
                 log_line(log_callback, f"[{index}/{len(tweet_urls)}] 读取推文：{normalized_url}")
                 try:
                     row.update(collect_tweet_metrics(page, normalized_url))
+                    
+                    if get_comments_bool:
+                        try:
+                            comments = extract_comments(page, normalized_url, max_comments_val, log_callback, stop_event)
+                            for comment in comments:
+                                comment_row = {
+                                    "序号": row["序号"],
+                                    "推文链接": normalized_url,
+                                    "评论的点赞量": comment.get("likes", ""),
+                                    "评论内容": comment.get("content", ""),
+                                    "评论发布时间": comment.get("time", "")
+                                }
+                                writer.writerow("评论信息", comment_row)
+                        except Exception as exc:
+                            log_line(log_callback, f"  提取评论失败：{exc}")
+                            
                 except PlaywrightTimeoutError:
                     log_line(log_callback, "  页面加载超时，写入空指标行。")
                 except Exception as exc:
                     log_line(log_callback, f"  处理失败，写入空指标行：{exc}")
 
-                writer.writerow(row)
+                if get_comments_bool:
+                    writer.writerow("推文信息", row)
+                else:
+                    writer.writerow(row)
                 writer.save()
                 log_line(log_callback, "  完成：已写入并保存。")
                 if index < len(tweet_urls) and index % COOLDOWN_EVERY == 0:

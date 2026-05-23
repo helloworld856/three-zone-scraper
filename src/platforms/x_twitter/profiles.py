@@ -6,7 +6,6 @@ import time
 from playwright.sync_api import sync_playwright
 
 from src.core import (
-    DEFAULT_X_CDP_URL,
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,

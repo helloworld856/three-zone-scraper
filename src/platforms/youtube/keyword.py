@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 from googleapiclient.discovery import build
 
-from src.core import XlsxRowWriter, build_output_path, sanitize_csv_rows, should_stop
+from src.core import XlsxRowWriter, MultiSheetXlsxWriter, build_output_path, sanitize_csv_rows, should_stop
+from src.platforms.youtube.comments import fetch_top_level_comments
 
 CSV_FIELDS = [
     "搜索词",
@@ -90,25 +91,28 @@ def search_video_ids(youtube, keyword: str, max_results: int, start_dt: datetime
     return video_ids
 
 
-def iter_search_video_id_batches(youtube, keyword: str, max_results: int, start_dt: datetime, end_dt: datetime, log_callback, stop_event=None):
+def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_time_bool: bool, start_dt: datetime | None, end_dt: datetime | None, log_callback, stop_event=None):
     seen_video_ids: set[str] = set()
     next_page_token = None
-    published_before = end_dt + timedelta(days=1)
 
     while len(seen_video_ids) < max_results:
         if should_stop(stop_event):
             log_callback("任务已停止。")
             break
-        response = youtube.search().list(
-            part="id",
-            q=keyword,
-            type="video",
-            order="relevance",
-            maxResults=min(50, max_results - len(seen_video_ids)),
-            pageToken=next_page_token,
-            publishedAfter=youtube_rfc3339(start_dt),
-            publishedBefore=youtube_rfc3339(published_before),
-        ).execute()
+            
+        params = {
+            "part": "id",
+            "q": keyword,
+            "type": "video",
+            "order": "relevance",
+            "maxResults": min(50, max_results - len(seen_video_ids)),
+            "pageToken": next_page_token,
+        }
+        if limit_time_bool and start_dt and end_dt:
+            params["publishedAfter"] = youtube_rfc3339(start_dt)
+            params["publishedBefore"] = youtube_rfc3339(end_dt + timedelta(days=1))
+            
+        response = youtube.search().list(**params).execute()
 
         batch_ids: list[str] = []
         for item in response.get("items", []):
@@ -161,11 +165,16 @@ def fetch_video_rows(youtube, keyword: str, video_ids: list[str], stop_event=Non
             )
     return rows
 
-def run_youtube_spider(api_key, keywords_list, max_results, start_date, end_date, log_callback, finish_callback, stop_event=None):
+def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, start_date, end_date, get_comments_str, max_comments, log_callback, finish_callback, stop_event=None):
     output_path = None
     output_paths: list[str] = []
     try:
-        start_dt, end_dt = parse_date_range(start_date, end_date)
+        limit_time_bool = limit_time_str == "是"
+        get_comments_bool = get_comments_str == "是"
+        start_dt, end_dt = None, None
+        if limit_time_bool:
+            start_dt, end_dt = parse_date_range(start_date, end_date)
+            
         youtube = build("youtube", "v3", developerKey=api_key)
         run_stamp = time.strftime("%Y%m%d")
 
@@ -179,20 +188,50 @@ def run_youtube_spider(api_key, keywords_list, max_results, start_date, end_date
             )
             output_paths.append(output_path)
 
-            writer = XlsxRowWriter(output_path, CSV_FIELDS)
+            if get_comments_bool:
+                comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "评论发布时间"]
+                writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields})
+            else:
+                writer = XlsxRowWriter(output_path, CSV_FIELDS)
             serial_number = 1
             log_callback(f"[{index}/{len(keywords_list)}] 搜索关键词：{keyword}")
             log_callback(f"  输出文件：{output_path}")
-            log_callback(f"  日期范围：{start_date} 至 {end_date}")
+            if limit_time_bool:
+                log_callback(f"  日期范围：{start_date} 至 {end_date}")
+            else:
+                log_callback("  日期范围：不限时间")
             written_count = 0
-            for video_ids in iter_search_video_id_batches(youtube, keyword, max_results, start_dt, end_dt, log_callback, stop_event):
+            for video_ids in iter_search_video_id_batches(youtube, keyword, max_results, limit_time_bool, start_dt, end_dt, log_callback, stop_event):
                 if should_stop(stop_event):
                     break
                 rows = fetch_video_rows(youtube, keyword, video_ids, stop_event)
                 for row in rows:
                     row["序号"] = str(serial_number)
+                    
+                    if get_comments_bool:
+                        try:
+                            video_id = row["视频链接"].split("v=")[1]
+                            comments = fetch_top_level_comments(youtube, video_id, max_comments, log_callback, stop_event)
+                            comments.sort(key=lambda item: item["like_count"], reverse=True)
+                            for comment in comments[:max_comments]:
+                                comment_row = {
+                                    "序号": row["序号"],
+                                    "视频链接": row["视频链接"],
+                                    "评论的点赞量": str(comment["like_count"]),
+                                    "评论内容": comment["text"],
+                                    "评论发布时间": comment.get("published_at", "")
+                                }
+                                writer.writerow("评论信息", comment_row)
+                        except Exception as exc:
+                            log_callback(f"    提取评论失败：{exc}")
+                            
                     serial_number += 1
-                writer.writerows(sanitize_csv_rows(rows))
+                    
+                if get_comments_bool:
+                    for r in rows:
+                        writer.writerow("视频信息", r)
+                else:
+                    writer.writerows(sanitize_csv_rows(rows))
                 written_count += len(rows)
                 log_callback(f"  已写入 {written_count} 条视频")
             writer.save()

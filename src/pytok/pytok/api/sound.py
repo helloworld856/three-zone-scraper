@@ -1,11 +1,7 @@
 from __future__ import annotations
-from os import path
 
-import json
 
-from urllib.parse import quote, urlencode
 
-from ..helpers import extract_tag_contents
 from ..exceptions import *
 
 from typing import TYPE_CHECKING, ClassVar, Iterator, Optional

@@ -1,5 +1,4 @@
 import asyncio
-import json
 
 from pytok.tiktok import PyTok
 

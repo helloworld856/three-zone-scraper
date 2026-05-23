@@ -9,7 +9,6 @@ import urllib.parse
 from playwright.sync_api import sync_playwright
 
 from src.core import (
-    DEFAULT_TIKTOK_CDP_URL,
     XlsxRowWriter,
     build_output_path,
     connect_existing_chromium,

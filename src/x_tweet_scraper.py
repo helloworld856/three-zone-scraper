@@ -26,7 +26,6 @@
 
 import os
 import re
-import json
 import time
 import argparse
 from datetime import datetime
@@ -39,7 +38,7 @@ except ImportError:
     exit(1)
 
 try:
-    from playwright.sync_api import sync_playwright, Page, Browser
+    from playwright.sync_api import sync_playwright, Page
 except ImportError:
     print("❌ 请先安装 playwright: pip install playwright && python -m playwright install chromium")
     exit(1)
@@ -243,23 +242,23 @@ def save_to_excel(tweets: list, username: str) -> str:
     print(f"\n{'='*60}")
     print(f"📁 文件路径: {filepath}")
     print(f"{'='*60}")
-    print(f"📊 数据统计:")
+    print("📊 数据统计:")
     print(f"   帖子总数: {len(output_df)}")
     print(f"   时间范围: {output_df['发布时间'].iloc[-1]} ~ {output_df['发布时间'].iloc[0]}")
     print(f"   总回复数: {output_df['回复数'].sum()}")
     print(f"   总转发数: {output_df['转发数'].sum()}")
     print(f"   总点赞数: {output_df['点赞数'].sum()}")
     print(f"{'='*60}")
-    print(f"📑 Excel列说明:")
-    print(f"   1. 序号       - 帖子编号")
-    print(f"   2. 帖子ID     - X平台帖子唯一标识")
-    print(f"   3. 发布时间   - 帖子发布日期和时间")
-    print(f"   4. 帖子内容   - 帖子完整文本")
-    print(f"   5. 帖子链接   - 原始帖子URL")
-    print(f"   6. 回复数     - 回复数量")
-    print(f"   7. 转发数     - 转发/转推数量")
-    print(f"   8. 点赞数     - 点赞数量")
-    print(f"   9. 浏览数     - 浏览/观看次数")
+    print("📑 Excel列说明:")
+    print("   1. 序号       - 帖子编号")
+    print("   2. 帖子ID     - X平台帖子唯一标识")
+    print("   3. 发布时间   - 帖子发布日期和时间")
+    print("   4. 帖子内容   - 帖子完整文本")
+    print("   5. 帖子链接   - 原始帖子URL")
+    print("   6. 回复数     - 回复数量")
+    print("   7. 转发数     - 转发/转推数量")
+    print("   8. 点赞数     - 点赞数量")
+    print("   9. 浏览数     - 浏览/观看次数")
     print(f"{'='*60}")
     
     return filepath

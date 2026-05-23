@@ -16,7 +16,9 @@ except ModuleNotFoundError:
     PlaywrightTimeoutError = TimeoutError
     sync_playwright = None
 
-from src.core import DEFAULT_X_CDP_URL, XlsxRowWriter, build_output_path, connect_existing_chromium, sanitize_csv_cell, should_stop
+from src.core import DEFAULT_X_CDP_URL, MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, connect_existing_chromium, sanitize_csv_cell, should_stop
+from src.platforms.youtube.comments import fetch_top_level_comments
+from src.platforms.youtube.keyword import parse_date_range
 
 
 CSV_FIELDS = ["序号", "作品链接", "作品内容", "浏览量", "评论数", "点赞数"]
@@ -143,7 +145,7 @@ def fetch_channel_item(youtube, channel_url: str) -> dict:
     return items[0] if items else {}
 
 
-def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items: int, log_callback, stop_event=None) -> list[str]:
+def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None) -> list[str]:
     video_ids: list[str] = []
     seen = set()
     page_token = None
@@ -158,13 +160,32 @@ def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items:
             maxResults=min(50, max_video_items - len(video_ids)),
             pageToken=page_token,
         ).execute()
+        
+        stopped_by_date = False
         for item in response.get("items", []):
+            pub_time = item.get("contentDetails", {}).get("videoPublishedAt", "")
+            if limit_time_bool and pub_time:
+                from datetime import datetime
+                try:
+                    pub_dt = datetime.strptime(pub_time.split("T")[0], "%Y-%m-%d")
+                    if pub_dt.date() < start_dt.date():
+                        stopped_by_date = True
+                        break
+                    if pub_dt.date() > end_dt.date():
+                        continue
+                except Exception:
+                    pass
+                    
             video_id = item.get("contentDetails", {}).get("videoId", "")
             if video_id and video_id not in seen:
                 seen.add(video_id)
                 video_ids.append(video_id)
 
         log_line(log_callback, f"  API 已读取视频类作品 {len(video_ids)} 条。")
+        if stopped_by_date:
+            log_line(log_callback, "  API 已读取到早于开始日期的视频，停止加载更多。")
+            break
+            
         page_token = response.get("nextPageToken")
         if not page_token:
             break
@@ -199,7 +220,7 @@ def video_rows_from_api(youtube, video_ids: list[str], stop_event=None) -> list[
     return rows
 
 
-def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int, log_callback, stop_event=None) -> list[dict[str, str]]:
+def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None) -> list[dict[str, str]]:
     channel_item = fetch_channel_item(youtube, channel_url)
     if not channel_item:
         log_line(log_callback, "  API 未找到频道信息。")
@@ -217,7 +238,7 @@ def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int
     title = channel_item.get("snippet", {}).get("title", "")
     if title:
         log_line(log_callback, f"  API 识别频道：{title}")
-    video_ids = collect_upload_video_ids(youtube, uploads_playlist_id, max_video_items, log_callback, stop_event)
+    video_ids = collect_upload_video_ids(youtube, uploads_playlist_id, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event)
     rows = video_rows_from_api(youtube, video_ids, stop_event)
     log_line(log_callback, f"  API 视频类作品完成：{len(rows)} 条。")
     return rows
@@ -543,6 +564,11 @@ def run_youtube_channel_works_spider(
     channel_urls_text: str,
     max_video_items: int = DEFAULT_MAX_VIDEO_ITEMS,
     max_post_scrolls: int = DEFAULT_MAX_POST_SCROLLS,
+    limit_time_str: str = "否",
+    start_date: str = "",
+    end_date: str = "",
+    get_comments_str: str = "否",
+    max_comments: int = 100,
     log_callback=None,
     finish_callback=None,
     stop_event=None,
@@ -566,8 +592,18 @@ def run_youtube_channel_works_spider(
             except Exception as exc:
                 log_line(log_callback, f"YouTube API 初始化失败，Videos/Shorts 将尝试浏览器 fallback：{exc}")
 
+        limit_time_bool = limit_time_str == "是"
+        get_comments_bool = get_comments_str == "是"
+        start_dt, end_dt = None, None
+        if limit_time_bool:
+            start_dt, end_dt = parse_date_range(start_date, end_date)
+            
         output_path = build_output_path("youtube", f"youtube_channel_works_{time.strftime('%Y%m%d')}.xlsx")
-        writer = XlsxRowWriter(output_path, CSV_FIELDS)
+        if get_comments_bool:
+            comment_fields = ["序号", "作品链接", "评论的点赞量", "评论内容", "评论发布时间"]
+            writer = MultiSheetXlsxWriter(output_path, {"作品信息": CSV_FIELDS, "评论信息": comment_fields})
+        else:
+            writer = XlsxRowWriter(output_path, CSV_FIELDS)
         serial_number = 1
 
         def ensure_page():
@@ -594,7 +630,7 @@ def run_youtube_channel_works_spider(
                 log_line(log_callback, "  YouTube API 不可用，尝试用浏览器读取 Videos/Shorts。")
             else:
                 try:
-                    works = collect_video_works_with_api(youtube, channel_url, max_video_items, log_callback, stop_event)
+                    works = collect_video_works_with_api(youtube, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event)
                     if not works:
                         should_fallback_video_tabs = True
                         log_line(log_callback, "  API 未返回 Videos/Shorts，尝试用浏览器读取。")
@@ -631,8 +667,38 @@ def run_youtube_channel_works_spider(
             rows = []
             for work in works:
                 rows.append(row_from_work(serial_number, work))
+                
+                if get_comments_bool and youtube is not None:
+                    try:
+                        work_link = work.get("link", "")
+                        video_id = ""
+                        if "watch?v=" in work_link:
+                            video_id = work_link.split("v=")[1].split("&")[0]
+                        elif "shorts/" in work_link:
+                            video_id = work_link.split("shorts/")[1].split("?")[0]
+                            
+                        if video_id:
+                            comments = fetch_top_level_comments(youtube, video_id, max_comments, log_callback, stop_event)
+                            comments.sort(key=lambda item: item["like_count"], reverse=True)
+                            for comment in comments[:max_comments]:
+                                comment_row = {
+                                    "序号": str(serial_number),
+                                    "作品链接": work_link,
+                                    "评论的点赞量": str(comment["like_count"]),
+                                    "评论内容": comment["text"],
+                                    "评论发布时间": comment.get("published_at", "")
+                                }
+                                writer.writerow("评论信息", comment_row)
+                    except Exception as exc:
+                        log_line(log_callback, f"    提取评论失败：{exc}")
+                        
                 serial_number += 1
-            writer.writerows(rows)
+                
+            if get_comments_bool:
+                for r in rows:
+                    writer.writerow("作品信息", r)
+            else:
+                writer.writerows(rows)
             writer.save()
             log_line(log_callback, f"  作者主页完成：写入 {len(rows)} 条。")
 
