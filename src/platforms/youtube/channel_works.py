@@ -16,7 +16,7 @@ except ModuleNotFoundError:
     PlaywrightTimeoutError = TimeoutError
     sync_playwright = None
 
-from src.core import DEFAULT_X_CDP_URL, MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, connect_existing_chromium, sanitize_csv_cell, should_stop, wait_if_paused
+from src.core import DEFAULT_X_CDP_URL, MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, connect_existing_chromium, interruptible_sleep, sanitize_csv_cell, should_stop, wait_if_paused
 from src.platforms.youtube.comments import fetch_top_level_comments
 from src.platforms.youtube.keyword import parse_date_range
 
@@ -348,7 +348,8 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
     label = "Videos" if tab == "videos" else "Shorts"
     log_line(log_callback, f"  Playwright 读取 {label}：{url}")
     page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
-    time.sleep(INITIAL_LOAD_DELAY)
+    if interruptible_sleep(INITIAL_LOAD_DELAY, stop_event):
+        return works
     wait_selector = 'a[href*="/watch?v="]' if tab == "videos" else 'a[href*="/shorts/"]'
     try:
         page.wait_for_selector(wait_selector, timeout=12000)
@@ -394,7 +395,8 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
                 break
 
         page.evaluate(f"window.scrollBy(0, {scroll_px})")
-        time.sleep(scroll_delay)
+        if interruptible_sleep(scroll_delay, stop_event):
+            break
 
     return works
 
@@ -530,7 +532,8 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
 
     url = posts_url(channel_url)
     page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
-    time.sleep(INITIAL_LOAD_DELAY)
+    if interruptible_sleep(INITIAL_LOAD_DELAY, stop_event):
+        return posts
 
     posts: list[dict[str, str]] = []
     seen_links = set()
@@ -572,7 +575,8 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
                 break
 
         page.evaluate(f"window.scrollBy(0, {scroll_px})")
-        time.sleep(scroll_delay)
+        if interruptible_sleep(scroll_delay, stop_event):
+            break
 
     return posts
 
