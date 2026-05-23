@@ -145,12 +145,13 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
             ConfigParam("no_new_post_limit", "无新内容停止阈值", kind="int", default=6, minimum=2, maximum=50),
             ConfigParam("scroll_px", "每次滚动像素", kind="int", default=2800, minimum=500, maximum=10000, step=100),
             ConfigParam("max_post_scrolls", "Posts 最大滚动次数", kind="int", default=200, minimum=1, maximum=5000),
+            ConfigParam("save_batch_size", "每N条保存一次", kind="int", default=10, minimum=1, maximum=100),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.channel_works import run_youtube_channel_works_spider
 
-        config = {k: v for k, v in values.items() if k in ("max_video_items", "page_load_timeout", "scroll_delay", "no_new_post_limit", "scroll_px", "max_post_scrolls")}
+        config = {k: v for k, v in values.items() if k in ("max_video_items", "page_load_timeout", "scroll_delay", "no_new_post_limit", "scroll_px", "max_post_scrolls", "save_batch_size")}
         return run_youtube_channel_works_spider(
             values["api_key"],
             values["channel_urls"],

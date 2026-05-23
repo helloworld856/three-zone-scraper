@@ -21,7 +21,7 @@ from src.platforms.youtube.comments import fetch_top_level_comments
 from src.platforms.youtube.keyword import parse_date_range
 
 
-CSV_FIELDS = ["序号", "作品链接", "作品内容", "浏览量", "评论数", "点赞数"]
+CSV_FIELDS = ["序号", "作者主页链接", "作品链接", "作品内容", "浏览量", "评论数", "点赞数"]
 PAGE_LOAD_TIMEOUT = 45000
 INITIAL_LOAD_DELAY = 1.8
 POST_SCROLL_DELAY = 0.8
@@ -29,6 +29,7 @@ POST_SCROLL_PX = 2800
 NO_NEW_POST_LIMIT = 6
 DEFAULT_MAX_POST_SCROLLS = 120
 DEFAULT_MAX_VIDEO_ITEMS = 500
+SAVE_BATCH_SIZE = 10
 
 
 def log_line(log_callback, text: str):
@@ -576,9 +577,10 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
     return posts
 
 
-def row_from_work(index: int, work: dict[str, str]) -> dict[str, str]:
+def row_from_work(index: int, work: dict[str, str], channel_url: str = "") -> dict[str, str]:
     return {
         "序号": str(index),
+        "作者主页链接": channel_url,
         "作品链接": work.get("link", ""),
         "作品内容": work.get("content", ""),
         "浏览量": work.get("views", ""),
@@ -704,10 +706,28 @@ def run_youtube_channel_works_spider(
                 except Exception as exc:
                     log_line(log_callback, f"  跳过 Posts：{exc}")
 
-            rows = []
+            save_batch_size = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
+            channel_written = 0
+            rows_buffer: list[dict[str, str]] = []
+
+            def _flush_rows():
+                nonlocal channel_written
+                if not rows_buffer:
+                    return
+                if get_comments_bool:
+                    for r in rows_buffer:
+                        writer.writerow("作品信息", r)
+                else:
+                    writer.writerows(rows_buffer)
+                writer.save()
+                channel_written += len(rows_buffer)
+                rows_buffer.clear()
+
             for work in works:
-                rows.append(row_from_work(serial_number, work))
-                
+                if should_stop(stop_event):
+                    break
+                rows_buffer.append(row_from_work(serial_number, work, channel_url))
+
                 if get_comments_bool and youtube is not None:
                     try:
                         work_link = work.get("link", "")
@@ -716,7 +736,7 @@ def run_youtube_channel_works_spider(
                             video_id = work_link.split("v=")[1].split("&")[0]
                         elif "shorts/" in work_link:
                             video_id = work_link.split("shorts/")[1].split("?")[0]
-                            
+
                         if video_id:
                             comments = fetch_top_level_comments(youtube, video_id, max_comments, log_callback, stop_event, pause_event)
                             comments.sort(key=lambda item: item["like_count"], reverse=True)
@@ -731,16 +751,14 @@ def run_youtube_channel_works_spider(
                                 writer.writerow("评论信息", comment_row)
                     except Exception as exc:
                         log_line(log_callback, f"    提取评论失败：{exc}")
-                        
+
                 serial_number += 1
-                
-            if get_comments_bool:
-                for r in rows:
-                    writer.writerow("作品信息", r)
-            else:
-                writer.writerows(rows)
-            writer.save()
-            log_line(log_callback, f"  作者主页完成：写入 {len(rows)} 条。")
+
+                if len(rows_buffer) >= save_batch_size:
+                    _flush_rows()
+
+            _flush_rows()
+            log_line(log_callback, f"  作者主页完成：写入 {channel_written} 条。")
 
         if page and not page.is_closed():
             page.close()

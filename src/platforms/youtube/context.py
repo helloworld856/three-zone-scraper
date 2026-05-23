@@ -173,7 +173,6 @@ def fetch_video_details(youtube, video_ids: list[str], stop_event=None, pause_ev
                 "published_at": snippet.get("publishedAt", ""),
                 "view_count": stats.get("viewCount", ""),
                 "like_count": stats.get("likeCount", ""),
-                "favorite_count": stats.get("favoriteCount", ""),
                 "comment_count": stats.get("commentCount", ""),
             }
     return details
@@ -187,7 +186,6 @@ OUTPUT_FIELDS = [
     "发布时间",
     "播放量",
     "点赞数",
-    "收藏数",
     "评论数",
     "视频ID",
 ]
@@ -236,7 +234,6 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
             "发布时间": item.get("published_at", ""),
             "播放量": item.get("view_count", ""),
             "点赞数": item.get("like_count", ""),
-            "收藏数": item.get("favorite_count", ""),
             "评论数": item.get("comment_count", ""),
             "视频ID": vid,
         })
