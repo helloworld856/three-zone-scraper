@@ -112,47 +112,23 @@ def get_tweet_url(article) -> str:
     return status_urls[0] if status_urls else ""
 
 def get_tweet_text(article) -> str:
-    expand_selectors = [
-        '[data-testid="tweet-text-show-more-link"]',
-        '[data-testid="tweetText"] span:has-text("Show more")',
-        '[data-testid="tweetText"] span:has-text("more")',
-        'span:has-text("Show more")',
-        'span:has-text("もっと見る")',
-        'span:has-text("더 보기")',
-        'div[role="button"]:has-text("Show more")',
-        '[role="button"]:has-text("Show more")',
-        '[role="link"]:has-text("Show more")',
-    ]
-    clicked = False
-    for selector in expand_selectors:
-        try:
-            btn = article.locator(selector).first
-            if btn.count() > 0:
-                try:
-                    btn.scroll_into_view_if_needed()
-                except Exception:
-                    pass
-                btn.click(force=True, timeout=2000)
-                time.sleep(0.5)
-                clicked = True
-                break
-        except Exception:
-            continue
-    if not clicked:
-        try:
-            article.evaluate("""el => {
-                const showMore = (
-                    el.querySelector('[data-testid="tweet-text-show-more-link"]')
-                    || [...el.querySelectorAll('span, div, button, a')].find(e => {
-                        const t = (e.innerText || '').trim().toLowerCase();
-                        return t === 'show more' || t === 'もっと見る' || t === '더 보기';
-                    })
-                );
-                if (showMore) { showMore.scrollIntoView({block: 'center'}); showMore.click(); }
-            }""")
-            time.sleep(0.5)
-        except Exception:
-            pass
+    try:
+        article.evaluate("""el => {
+            const tweetText = el.querySelector('[data-testid="tweetText"]');
+            if (!tweetText) return;
+            const showMore = (
+                tweetText.querySelector('[data-testid="tweet-text-show-more-link"]')
+                || [...tweetText.querySelectorAll('span, div')].find(e => {
+                    const t = (e.innerText || '').trim().toLowerCase();
+                    return (t === 'show more' || t === 'もっと見る' || t === '더 보기')
+                        && !e.closest('a[href*="/status/"]');
+                })
+            );
+            if (showMore) { showMore.scrollIntoView({block: 'center'}); showMore.click(); }
+        }""")
+        time.sleep(0.5)
+    except Exception:
+        pass
     return safe_text(article.locator('[data-testid="tweetText"]'), default="无文字内容")
 
 def get_tweet_time(article) -> str:
@@ -401,7 +377,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                                     try:
                                         detail_page.goto(tweet_url, wait_until="domcontentloaded", timeout=30000)
                                         detail_page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
-                                        time.sleep(2)
+                                        interruptible_sleep(2, stop_event)
                                         comments = extract_comments(detail_page, tweet_url, max_comments, log_callback, stop_event, pause_event=pause_event)
                                         for comment in comments:
                                             comment_row = {

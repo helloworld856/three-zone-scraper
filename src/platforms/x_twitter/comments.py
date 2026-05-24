@@ -15,6 +15,8 @@ from src.core import (
     XlsxRowWriter,
     build_output_path,
     connect_existing_chromium,
+    expand_compact_number,
+    interruptible_sleep,
     random_cooldown,
     sanitize_csv_cell,
     should_stop,
@@ -70,22 +72,8 @@ def parse_tweet_urls(txt_path: str) -> list[str]:
                 seen.add(url)
     return urls
 
-def parse_metric_text(text: str) -> str:
-    if not text:
-        return "0"
-    value = text.strip().replace(",", "")
-    match = re.match(r"^([\d.]+)\s*([KkMmBb]?)$", value)
-    if not match:
-        return value
-    number = float(match.group(1))
-    suffix = match.group(2).upper()
-    multipliers = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
-    if suffix in multipliers:
-        number *= multipliers[suffix]
-    return str(int(number))
-
 def metric_to_int(value: str) -> int:
-    text = parse_metric_text(str(value or "0")).replace(",", "")
+    text = expand_compact_number(str(value or "0")).replace(",", "")
     match = re.search(r"\d+", text)
     return int(match.group(0)) if match else 0
 
@@ -499,14 +487,14 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
                 if like_btn:
                     like_text = like_btn.inner_text().strip()
                     if like_text:
-                        like_count = parse_metric_text(like_text)
+                        like_count = expand_compact_number(like_text)
 
                 reply_count = "0"
                 reply_btn = article.query_selector('button[data-testid="reply"] span span')
                 if reply_btn:
                     reply_text = reply_btn.inner_text().strip()
                     if reply_text:
-                        reply_count = parse_metric_text(reply_text)
+                        reply_count = expand_compact_number(reply_text)
 
                 comments.append(
                     {
@@ -539,7 +527,7 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
         if len(comments) < max_count:
             page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
-            time.sleep(scroll_pause)
+            interruptible_sleep(scroll_pause, stop_event)
 
     log_line(log_callback, f"  评论抓取完成：{len(comments)} 条。")
     return comments
@@ -613,7 +601,7 @@ def run_x_top_comments_spider(
                 try:
                     page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_load_timeout_val)
                     page.wait_for_selector('article[data-testid="tweet"]', timeout=page_load_timeout_val)
-                    time.sleep(3)
+                    interruptible_sleep(3, stop_event)
 
                     comments = extract_comments(page, tweet_url, max_comments, log_callback, stop_event, scroll_pause=scroll_pause_val, no_new_scroll_limit=no_new_scroll_limit_val, pause_event=pause_event)
                     rows = build_comment_rows(index, tweet_url, comments, top_limit=tweet_comment_top_limit)

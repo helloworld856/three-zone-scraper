@@ -19,6 +19,7 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_sleep,
     sanitize_csv_cell,
     should_stop,
     wait_if_paused,
@@ -203,6 +204,17 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
                     if (!info.postId || normalize(info.handle) !== username) continue;
 
                     const textEl = article.querySelector('[data-testid="tweetText"]');
+                    if (textEl) {
+                        const showMore = (
+                            textEl.querySelector('[data-testid="tweet-text-show-more-link"]')
+                            || [...textEl.querySelectorAll('span, div')].find(e => {
+                                const t = (e.innerText || '').trim().toLowerCase();
+                                return (t === 'show more' || t === 'もっと見る' || t === '더 보기')
+                                    && !e.closest('a[href*="/status/"]');
+                            })
+                        );
+                        if (showMore) { showMore.click(); }
+                    }
                     const text = textEl ? (textEl.innerText || textEl.textContent || '').trim() : '';
                     const timeEl = article.querySelector('time');
                     const publishedAt = timeEl ? (timeEl.getAttribute('datetime') || '') : '';
@@ -267,7 +279,7 @@ def collect_profile_tweets(
 
     page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_timeout)
     page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
-    time.sleep(INITIAL_LOAD_DELAY)
+    interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
 
     tweets: list[dict[str, str]] = []
     pending_rows: list[dict[str, str]] = []
@@ -314,7 +326,7 @@ def collect_profile_tweets(
                     try:
                         detail_page.goto(normalized_tweet["url"], wait_until="domcontentloaded", timeout=30000)
                         detail_page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
-                        time.sleep(2)
+                        interruptible_sleep(2, stop_event)
                         comments = extract_comments(detail_page, normalized_tweet["url"], max_comments, log_callback, stop_event, pause_event=pause_event)
                         for comment in comments:
                             comment_row = {
@@ -354,7 +366,7 @@ def collect_profile_tweets(
             break
 
         page.evaluate(f"window.scrollBy(0, {SCROLL_PX})")
-        time.sleep(scroll_delay + 1.0 if no_new_count else scroll_delay)
+        interruptible_sleep(scroll_delay + 1.0 if no_new_count else scroll_delay, stop_event)
 
     if writer and pending_rows:
         if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):

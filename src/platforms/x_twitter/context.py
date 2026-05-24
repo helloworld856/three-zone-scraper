@@ -12,6 +12,7 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_sleep,
     random_cooldown,
     sanitize_csv_rows,
     should_stop,
@@ -209,6 +210,23 @@ def get_tweet_datetime(article) -> datetime | None:
         return None
 
 def get_tweet_text(article) -> str:
+    try:
+        article.evaluate("""el => {
+            const tweetText = el.querySelector('[data-testid="tweetText"]');
+            if (!tweetText) return;
+            const showMore = (
+                tweetText.querySelector('[data-testid="tweet-text-show-more-link"]')
+                || [...tweetText.querySelectorAll('span, div')].find(e => {
+                    const t = (e.innerText || '').trim().toLowerCase();
+                    return (t === 'show more' || t === 'もっと見る' || t === '더 보기')
+                        && !e.closest('a[href*="/status/"]');
+                })
+            );
+            if (showMore) { showMore.scrollIntoView({block: 'center'}); showMore.click(); }
+        }""")
+        time.sleep(0.5)
+    except Exception:
+        pass
     return safe_text(article.locator('[data-testid="tweetText"]'))
 
 def collect_status_urls(article, profile_handle: str = "") -> list[str]:
@@ -292,12 +310,12 @@ def find_target_article(page, target_status_id: str):
             continue
     return None
 
-def resolve_profile_url_from_tweet_page(page, target_tweet_url: str, target_status_id: str, page_timeout=None) -> str:
+def resolve_profile_url_from_tweet_page(page, target_tweet_url: str, target_status_id: str, page_timeout=None, stop_event=None) -> str:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
     try:
         page.goto(target_tweet_url, wait_until="domcontentloaded", timeout=page_timeout)
-        time.sleep(2.5)
+        interruptible_sleep(2.5, stop_event)
     except Exception:
         return ""
 
@@ -358,7 +376,7 @@ def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_
     no_growth_count = 0
 
     page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout)
-    time.sleep(1.2)
+    interruptible_sleep(1.2, stop_event)
     try:
         page.wait_for_selector('article[data-testid="tweet"]', timeout=15000)
     except Exception:
@@ -416,7 +434,7 @@ def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_
             ).first
             if retry_btn.count() > 0:
                 retry_btn.click(force=True)
-                time.sleep(2.5)
+                interruptible_sleep(2.5, stop_event)
         except Exception:
             pass
 
@@ -425,7 +443,7 @@ def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_
             page.evaluate("window.scrollBy(0, Math.floor(window.innerHeight * 2.6))")
         except Exception:
             pass
-        time.sleep(scroll_pause)
+        interruptible_sleep(scroll_pause, stop_event)
 
     return timeline_urls, target_index
 
@@ -463,7 +481,7 @@ def collect_author_search_timeline(
             log_callback(f"  搜索页打开失败，继续下一个窗口：{exc}")
             continue
 
-        time.sleep(1.5)
+        interruptible_sleep(1.5, stop_event)
         rows_by_url: dict[str, tuple[datetime | None, int]] = {}
         seen_order = 0
         target_url = ""
@@ -515,7 +533,7 @@ def collect_author_search_timeline(
                 page.evaluate("window.scrollBy(0, Math.floor(window.innerHeight * 2.4))")
             except Exception:
                 pass
-            time.sleep(0.7)
+            interruptible_sleep(0.7, stop_event)
 
         if not rows_by_url:
             continue
@@ -545,14 +563,14 @@ def collect_author_search_timeline(
 
     return [], -1
 
-def extract_detail_metrics(page, tweet_url: str, fallback: dict, log_callback, page_timeout=None) -> dict:
+def extract_detail_metrics(page, tweet_url: str, fallback: dict, log_callback, page_timeout=None, stop_event=None) -> dict:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
     target_status_id = extract_status_id(tweet_url)
     metrics = dict(fallback or {})
     try:
         page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_timeout)
-        time.sleep(2.2)
+        interruptible_sleep(2.2, stop_event)
         article = find_target_article(page, target_status_id)
         if article is None:
             return metrics
@@ -663,7 +681,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
 
                     if target_index < 0:
                         log_callback("  快速候选页未命中，打开目标推文详情页反查作者后再补扫一次。")
-                        resolved_profile_url = resolve_profile_url_from_tweet_page(page, target_tweet_url, target_status_id, page_timeout=page_load_timeout_val)
+                        resolved_profile_url = resolve_profile_url_from_tweet_page(page, target_tweet_url, target_status_id, page_timeout=page_load_timeout_val, stop_event=stop_event)
                         if resolved_profile_url:
                             if normalize_x_url(resolved_profile_url) != normalize_x_url(profile_url):
                                 log_callback(f"  从目标推文详情页反查到作者主页：{resolved_profile_url}")
@@ -697,7 +715,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                         tweet_url = timeline_urls[current_index]
                         relation = relation_for_index(target_index, current_index)
                         log_callback(f"  提取 {relation}：{tweet_url}")
-                        metrics = extract_detail_metrics(page, tweet_url, {}, log_callback, page_timeout=page_load_timeout_val)
+                        metrics = extract_detail_metrics(page, tweet_url, {}, log_callback, page_timeout=page_load_timeout_val, stop_event=stop_event)
                         rows.append(
                             {
                                 "博主主页链接": matched_profile_url,
