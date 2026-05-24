@@ -12,14 +12,16 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_sleep,
     random_cooldown,
     sanitize_csv_rows,
     should_stop,
+    wait_if_paused,
 )
 
 CONTEXT_SIZE = 5
 MAX_PROFILE_SCROLLS = 45
-PROFILE_SCROLL_PAUSE = 0.6
+PROFILE_SCROLL_PAUSE = 3.8
 PAGE_LOAD_TIMEOUT = 45000
 MAX_SEARCH_SCROLLS = 35
 TWITTER_EPOCH_MS = 1288834974657
@@ -54,7 +56,7 @@ def normalize_x_url(url: str) -> str:
 
 def parse_input_pairs(txt_path: str) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
-    with open(txt_path, "r", encoding="utf-8") as f:
+    with open(txt_path, "r", encoding="utf-8-sig") as f:
         for line in f:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -91,7 +93,7 @@ def extract_profile_handle(profile_url: str) -> str:
     if not match:
         return ""
     handle = match.group(1).strip("@")
-    if handle.lower() in {"home", "search", "i", "notifications", "messages"}:
+    if handle.lower() in {"home", "explore", "search", "i", "notifications", "messages", "settings", "signup", "login"}:
         return ""
     return handle
 
@@ -193,10 +195,10 @@ def get_tweet_time(article) -> str:
     if not raw_time:
         return ""
     try:
-        dt_obj = time.strptime(raw_time[:19], "%Y-%m-%dT%H:%M:%S")
-        return time.strftime("%Y-%m-%d %H:%M:%S", dt_obj)
-    except Exception:
-        return raw_time
+        dt_obj = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+        return dt_obj.strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, AttributeError):
+        return raw_time[:19] if raw_time else ""
 
 def get_tweet_datetime(article) -> datetime | None:
     raw_time = safe_attr(article.locator("time"), "datetime", default="")
@@ -208,6 +210,42 @@ def get_tweet_datetime(article) -> datetime | None:
         return None
 
 def get_tweet_text(article) -> str:
+    try:
+        article.evaluate("""el => {
+            // Step 1: Revert auto-translation — click "View original" / "查看原文" / "原文を表示"
+            const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
+            const allNodes = el.querySelectorAll('*');
+            for (const node of allNodes) {
+                const text = (node.textContent || '').trim().toLowerCase();
+                if (!text || node.children.length > 0) continue;
+                if (revertTexts.includes(text)) {
+                    try { node.click(); } catch (_) {}
+                    break;
+                }
+            }
+
+            // Step 2: Remove CSS truncation to reveal full text
+            const tweetText = el.querySelector('[data-testid="tweetText"]');
+            if (!tweetText) return;
+            tweetText.style.setProperty('max-height', 'none', 'important');
+            tweetText.style.setProperty('overflow', 'visible', 'important');
+            tweetText.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+            tweetText.style.setProperty('display', 'block', 'important');
+            tweetText.style.setProperty('white-space', 'normal', 'important');
+
+            // Step 3: Click "Show more" if present (for dynamic-load cases)
+            const expandTexts = ['show more', 'show more...', 'もっと見る', '더 보기'];
+            for (const node of allNodes) {
+                const text = (node.textContent || '').trim().toLowerCase();
+                if (!text || node.children.length > 0) continue;
+                if (!expandTexts.includes(text)) continue;
+                try { node.click(); } catch (_) {}
+                break;
+            }
+        }""")
+        time.sleep(0.3)
+    except Exception:
+        pass
     return safe_text(article.locator('[data-testid="tweetText"]'))
 
 def collect_status_urls(article, profile_handle: str = "") -> list[str]:
@@ -291,10 +329,12 @@ def find_target_article(page, target_status_id: str):
             continue
     return None
 
-def resolve_profile_url_from_tweet_page(page, target_tweet_url: str, target_status_id: str) -> str:
+def resolve_profile_url_from_tweet_page(page, target_tweet_url: str, target_status_id: str, page_timeout=None, stop_event=None) -> str:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
     try:
-        page.goto(target_tweet_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-        time.sleep(2.5)
+        page.goto(target_tweet_url, wait_until="domcontentloaded", timeout=page_timeout)
+        interruptible_sleep(2.5, stop_event)
     except Exception:
         return ""
 
@@ -340,21 +380,32 @@ def extract_metrics_from_article(article) -> dict:
         ),
     }
 
-def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_callback) -> tuple[list[str], int]:
+def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_callback, page_timeout=None, max_scrolls=None, scroll_pause=None, context_size=CONTEXT_SIZE, pause_event=None, stop_event=None) -> tuple[list[str], int]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if max_scrolls is None:
+        max_scrolls = MAX_PROFILE_SCROLLS
+    if scroll_pause is None:
+        scroll_pause = PROFILE_SCROLL_PAUSE
+
     profile_url = normalize_x_url(profile_url)
     profile_handle = extract_profile_handle(profile_url)
     timeline_urls: list[str] = []
     target_index = -1
     no_growth_count = 0
 
-    page.goto(profile_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-    time.sleep(1.2)
+    page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout)
+    interruptible_sleep(1.2, stop_event)
     try:
         page.wait_for_selector('article[data-testid="tweet"]', timeout=15000)
     except Exception:
         pass
 
-    for scroll_idx in range(MAX_PROFILE_SCROLLS):
+    for scroll_idx in range(max_scrolls):
+        if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
+            break
         previous_count = len(timeline_urls)
         try:
             articles = page.locator('article[data-testid="tweet"]').all()
@@ -381,7 +432,7 @@ def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_
                     target_index = idx
                     break
 
-        if target_index >= 0 and len(timeline_urls) >= target_index + CONTEXT_SIZE + 1:
+        if target_index >= 0 and len(timeline_urls) >= target_index + context_size + 1:
             break
 
         if len(timeline_urls) == previous_count:
@@ -402,7 +453,7 @@ def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_
             ).first
             if retry_btn.count() > 0:
                 retry_btn.click(force=True)
-                time.sleep(2.5)
+                interruptible_sleep(2.5, stop_event)
         except Exception:
             pass
 
@@ -411,7 +462,7 @@ def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_
             page.evaluate("window.scrollBy(0, Math.floor(window.innerHeight * 2.6))")
         except Exception:
             pass
-        time.sleep(PROFILE_SCROLL_PAUSE)
+        interruptible_sleep(scroll_pause, stop_event)
 
     return timeline_urls, target_index
 
@@ -426,7 +477,16 @@ def collect_author_search_timeline(
     handle: str,
     target_status_id: str,
     log_callback,
+    page_timeout=None,
+    context_size=None,
+    pause_event=None,
+    stop_event=None,
 ) -> tuple[list[str], int]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if context_size is None:
+        context_size = CONTEXT_SIZE
+
     center_dt = datetime_from_status_id(target_status_id)
     if center_dt is None or not handle:
         return [], -1
@@ -435,18 +495,22 @@ def collect_author_search_timeline(
         search_url = build_author_search_url(handle, center_dt, window_days)
         log_callback(f"  尝试作者搜索窗口：前后 {window_days} 天")
         try:
-            page.goto(search_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+            page.goto(search_url, wait_until="domcontentloaded", timeout=page_timeout)
         except Exception as exc:
             log_callback(f"  搜索页打开失败，继续下一个窗口：{exc}")
             continue
 
-        time.sleep(1.5)
+        interruptible_sleep(1.5, stop_event)
         rows_by_url: dict[str, tuple[datetime | None, int]] = {}
         seen_order = 0
         target_url = ""
         no_growth_count = 0
 
         for _ in range(MAX_SEARCH_SCROLLS):
+            if should_stop(stop_event):
+                break
+            if wait_if_paused(pause_event, stop_event):
+                break
             previous_count = len(rows_by_url)
             try:
                 articles = page.locator('article[data-testid="tweet"]').all()
@@ -473,7 +537,7 @@ def collect_author_search_timeline(
                 if is_target_article:
                     target_url = tweet_url
 
-            if target_url and len(rows_by_url) >= CONTEXT_SIZE * 2 + 1:
+            if target_url and len(rows_by_url) >= context_size * 2 + 1:
                 break
 
             if len(rows_by_url) == previous_count:
@@ -488,7 +552,7 @@ def collect_author_search_timeline(
                 page.evaluate("window.scrollBy(0, Math.floor(window.innerHeight * 2.4))")
             except Exception:
                 pass
-            time.sleep(0.7)
+            interruptible_sleep(0.7, stop_event)
 
         if not rows_by_url:
             continue
@@ -518,12 +582,17 @@ def collect_author_search_timeline(
 
     return [], -1
 
-def extract_detail_metrics(page, tweet_url: str, fallback: dict, log_callback) -> dict:
+def extract_detail_metrics(page, tweet_url: str, fallback: dict, log_callback, page_timeout=None, stop_event=None) -> dict:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if should_stop(stop_event):
+        return dict(fallback or {})
     target_status_id = extract_status_id(tweet_url)
     metrics = dict(fallback or {})
     try:
-        page.goto(tweet_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-        time.sleep(2.2)
+        page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_timeout)
+        if interruptible_sleep(2.2, stop_event):
+            return metrics
         article = find_target_article(page, target_status_id)
         if article is None:
             return metrics
@@ -535,18 +604,27 @@ def extract_detail_metrics(page, tweet_url: str, fallback: dict, log_callback) -
         log_callback(f"    详情页补充失败，保留主页已提取指标：{exc}")
     return metrics
 
-def selected_context_indices(timeline_urls: list[str], target_index: int) -> list[int]:
-    indices = list(range(max(0, target_index - CONTEXT_SIZE), target_index))
-    indices += list(range(target_index + 1, min(len(timeline_urls), target_index + CONTEXT_SIZE + 1)))
+def selected_context_indices(timeline_urls: list[str], target_index: int, context_size=None) -> list[int]:
+    if context_size is None:
+        context_size = CONTEXT_SIZE
+    indices = list(range(max(0, target_index - context_size), target_index))
+    indices += list(range(target_index + 1, min(len(timeline_urls), target_index + context_size + 1)))
     return indices
 
-def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None):
+def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+    if config is None:
+        config = {}
+    context_size_val = int(config.get("context_size", CONTEXT_SIZE))
+    max_profile_scrolls_val = int(config.get("max_profile_scrolls", MAX_PROFILE_SCROLLS))
+    profile_scroll_pause_val = float(config.get("profile_scroll_pause", PROFILE_SCROLL_PAUSE))
+    page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+
     output_path = None
     completed_path = None
     try:
         pairs = parse_input_pairs(txt_path)
         if not pairs:
-            log_callback("TXT 中没有有效的“推文链接 + 博主主页链接”行。")
+            log_callback("TXT 中没有有效的\"推文链接 + 博主主页链接\"行。")
             return
 
         output_path = build_output_path("x", f"x_paired_context_metrics_{time.strftime('%Y%m%d')}.xlsx")
@@ -564,6 +642,8 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
             for index, (target_tweet_url, profile_url) in enumerate(pairs, 1):
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
+                    break
+                if wait_if_paused(pause_event, stop_event):
                     break
                 target_status_id = extract_status_id(target_tweet_url)
                 log_callback(f"[{index}/{len(pairs)}] 定位目标推文：{target_tweet_url}")
@@ -587,6 +667,10 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                             search_handle,
                             target_status_id,
                             log_callback,
+                            page_timeout=page_load_timeout_val,
+                            context_size=context_size_val,
+                            pause_event=pause_event,
+                            stop_event=stop_event,
                         )
                         if target_index >= 0:
                             matched_profile_url = f"https://x.com/{search_handle}"
@@ -606,6 +690,12 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                                 candidate_profile_url,
                                 target_status_id,
                                 log_callback,
+                                page_timeout=page_load_timeout_val,
+                                max_scrolls=max_profile_scrolls_val,
+                                scroll_pause=profile_scroll_pause_val,
+                                context_size=context_size_val,
+                                pause_event=pause_event,
+                                stop_event=stop_event,
                             )
                             log_callback(f"  当前时间线共收集 {len(timeline_urls)} 条推文链接。")
                             if target_index >= 0:
@@ -614,7 +704,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
 
                     if target_index < 0:
                         log_callback("  快速候选页未命中，打开目标推文详情页反查作者后再补扫一次。")
-                        resolved_profile_url = resolve_profile_url_from_tweet_page(page, target_tweet_url, target_status_id)
+                        resolved_profile_url = resolve_profile_url_from_tweet_page(page, target_tweet_url, target_status_id, page_timeout=page_load_timeout_val, stop_event=stop_event)
                         if resolved_profile_url:
                             if normalize_x_url(resolved_profile_url) != normalize_x_url(profile_url):
                                 log_callback(f"  从目标推文详情页反查到作者主页：{resolved_profile_url}")
@@ -627,6 +717,12 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                                     candidate_profile_url,
                                     target_status_id,
                                     log_callback,
+                                    page_timeout=page_load_timeout_val,
+                                    max_scrolls=max_profile_scrolls_val,
+                                    scroll_pause=profile_scroll_pause_val,
+                                    context_size=context_size_val,
+                                    pause_event=pause_event,
+                                    stop_event=stop_event,
                                 )
                                 log_callback(f"  当前时间线共收集 {len(timeline_urls)} 条推文链接。")
                                 if target_index >= 0:
@@ -637,13 +733,13 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                         log_callback("  跳过：在博主主页和回复页中都没有找到目标推文。目标可能太旧、不可见、不是该作者公开时间线内容，或页面没有继续加载。")
                         continue
 
-                    indices = selected_context_indices(timeline_urls, target_index)
+                    indices = selected_context_indices(timeline_urls, target_index, context_size=context_size_val)
                     rows = []
                     for current_index in indices:
                         tweet_url = timeline_urls[current_index]
                         relation = relation_for_index(target_index, current_index)
                         log_callback(f"  提取 {relation}：{tweet_url}")
-                        metrics = extract_detail_metrics(page, tweet_url, {}, log_callback)
+                        metrics = extract_detail_metrics(page, tweet_url, {}, log_callback, page_timeout=page_load_timeout_val, stop_event=stop_event)
                         rows.append(
                             {
                                 "博主主页链接": matched_profile_url,

@@ -15,14 +15,17 @@ from src.core import (
     XlsxRowWriter,
     build_output_path,
     connect_existing_chromium,
+    expand_compact_number,
+    interruptible_sleep,
     random_cooldown,
     sanitize_csv_cell,
     should_stop,
+    wait_if_paused,
 )
 
 TOP_COMMENT_LIMIT = 100
 DEFAULT_SCAN_LIMIT = 500
-SCROLL_PAUSE = 2.0
+SCROLL_PAUSE = 4.0
 PAGE_LOAD_TIMEOUT = 30000
 NO_NEW_SCROLL_LIMIT = 5
 CSV_FIELDS = ["编号", "帖文链接", "点赞数", "评论内容", "评论发布时间"]
@@ -69,22 +72,8 @@ def parse_tweet_urls(txt_path: str) -> list[str]:
                 seen.add(url)
     return urls
 
-def parse_metric_text(text: str) -> str:
-    if not text:
-        return "0"
-    value = text.strip().replace(",", "")
-    match = re.match(r"^([\d.]+)\s*([KkMmBb]?)$", value)
-    if not match:
-        return value
-    number = float(match.group(1))
-    suffix = match.group(2).upper()
-    multipliers = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
-    if suffix in multipliers:
-        number *= multipliers[suffix]
-    return str(int(number))
-
 def metric_to_int(value: str) -> int:
-    text = parse_metric_text(str(value or "0")).replace(",", "")
+    text = expand_compact_number(str(value or "0")).replace(",", "")
     match = re.search(r"\d+", text)
     return int(match.group(0)) if match else 0
 
@@ -215,7 +204,7 @@ def find_main_tweet_article(page, target_status_id: str):
     for article in articles:
         if article_own_status_id(article) == target_status_id:
             return article
-    return articles[0] if articles else None
+    return None
 
 def recommendation_boundary_visible(page) -> bool:
     markers = [marker.lower() for marker in RECOMMENDATION_MARKERS]
@@ -396,7 +385,12 @@ def detect_non_text_content_type(article) -> str:
         return "投票"
     return "非文本"
 
-def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, log_callback=None, stop_event=None) -> list[dict[str, str]]:
+def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, log_callback=None, stop_event=None, scroll_pause=None, no_new_scroll_limit=None, pause_event=None) -> list[dict[str, str]]:
+    if scroll_pause is None:
+        scroll_pause = SCROLL_PAUSE
+    if no_new_scroll_limit is None:
+        no_new_scroll_limit = NO_NEW_SCROLL_LIMIT
+
     comments: list[dict[str, str]] = []
     seen_ids = set()
     no_new_count = 0
@@ -415,6 +409,8 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
     while len(comments) < max_count:
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         articles = page.query_selector_all('article[data-testid="tweet"]')
         new_found = 0
@@ -446,6 +442,31 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
                     continue
                 if not is_direct_reply_to_main(article, target_status_id, main_author_handle, own_status_id):
                     continue
+
+                # Revert auto-translation and remove CSS truncation before reading text
+                try:
+                    article.evaluate("""async (el) => {
+                        const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
+                        const allNodes = el.querySelectorAll('*');
+                        for (const node of allNodes) {
+                            const text = (node.textContent || '').trim().toLowerCase();
+                            if (!text || node.children.length > 0) continue;
+                            if (revertTexts.includes(text)) {
+                                try { node.click(); } catch (_) {}
+                                break;
+                            }
+                        }
+                        const tweetText = el.querySelector('[data-testid="tweetText"]');
+                        if (tweetText) {
+                            tweetText.style.setProperty('max-height', 'none', 'important');
+                            tweetText.style.setProperty('overflow', 'visible', 'important');
+                            tweetText.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+                        }
+                        // Wait for React to re-render with original text
+                        await new Promise(r => setTimeout(r, 400));
+                    }""")
+                except Exception:
+                    pass
 
                 content_el = article.query_selector('div[data-testid="tweetText"]')
                 content = content_el.inner_text().strip() if content_el else ""
@@ -485,20 +506,31 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
                             break
 
                 like_count = "0"
-                like_btn = article.query_selector('button[data-testid="like"] span span')
-                if not like_btn:
-                    like_btn = article.query_selector('button[data-testid="unlike"] span span')
-                if like_btn:
-                    like_text = like_btn.inner_text().strip()
-                    if like_text:
-                        like_count = parse_metric_text(like_text)
+                for testid in ("like", "unlike"):
+                    btn = article.query_selector(f'button[data-testid="{testid}"]')
+                    if not btn:
+                        continue
+                    raw_text = btn.inner_text().strip()
+                    if raw_text and re.search(r"\d", raw_text):
+                        like_count = expand_compact_number(raw_text)
+                        break
+                    aria = btn.get_attribute("aria-label") or ""
+                    match = re.search(r"([\d,.]+(?:\.\d+)?\s*[KkMmBb]?)", aria)
+                    if match:
+                        like_count = expand_compact_number(match.group(1))
+                        break
 
                 reply_count = "0"
-                reply_btn = article.query_selector('button[data-testid="reply"] span span')
+                reply_btn = article.query_selector('button[data-testid="reply"]')
                 if reply_btn:
-                    reply_text = reply_btn.inner_text().strip()
-                    if reply_text:
-                        reply_count = parse_metric_text(reply_text)
+                    raw_text = reply_btn.inner_text().strip()
+                    if raw_text and re.search(r"\d", raw_text):
+                        reply_count = expand_compact_number(raw_text)
+                    else:
+                        aria = reply_btn.get_attribute("aria-label") or ""
+                        match = re.search(r"([\d,.]+(?:\.\d+)?\s*[KkMmBb]?)", aria)
+                        if match:
+                            reply_count = expand_compact_number(match.group(1))
 
                 comments.append(
                     {
@@ -519,8 +551,8 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
         if new_found == 0:
             no_new_count += 1
-            if no_new_count >= NO_NEW_SCROLL_LIMIT:
-                log_line(log_callback, f"  连续 {NO_NEW_SCROLL_LIMIT} 次滚动没有发现新评论，停止。")
+            if no_new_count >= no_new_scroll_limit:
+                log_line(log_callback, f"  连续 {no_new_scroll_limit} 次滚动没有发现新评论，停止。")
                 break
         else:
             no_new_count = 0
@@ -531,12 +563,14 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
         if len(comments) < max_count:
             page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
-            time.sleep(SCROLL_PAUSE)
+            interruptible_sleep(scroll_pause, stop_event)
 
     log_line(log_callback, f"  评论抓取完成：{len(comments)} 条。")
     return comments
 
-def build_comment_rows(tweet_index: int, tweet_url: str, comments: list[dict[str, str]]) -> list[dict[str, str]]:
+def build_comment_rows(tweet_index: int, tweet_url: str, comments: list[dict[str, str]], top_limit=None) -> list[dict[str, str]]:
+    if top_limit is None:
+        top_limit = TOP_COMMENT_LIMIT
     top_comments = sorted(comments, key=lambda item: metric_to_int(item.get("likes", "0")), reverse=True)
     return [
         {
@@ -546,7 +580,7 @@ def build_comment_rows(tweet_index: int, tweet_url: str, comments: list[dict[str
             "评论内容": comment.get("content", ""),
             "评论发布时间": comment.get("time", ""),
         }
-        for comment in top_comments[:TOP_COMMENT_LIMIT]
+        for comment in top_comments[:top_limit]
     ]
 
 def run_x_top_comments_spider(
@@ -556,7 +590,16 @@ def run_x_top_comments_spider(
     log_callback,
     finish_callback,
     stop_event=None,
+    config=None,
+    pause_event=None,
 ):
+    if config is None:
+        config = {}
+    tweet_comment_top_limit = int(config.get("tweet_comment_top_limit", TOP_COMMENT_LIMIT))
+    page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    scroll_pause_val = float(config.get("scroll_pause", SCROLL_PAUSE))
+    no_new_scroll_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
+
     completed_path = None
     page = None
     try:
@@ -569,7 +612,7 @@ def run_x_top_comments_spider(
             log_callback("未读取到有效的 X/Twitter 推文链接。")
             return
 
-        max_comments = max(TOP_COMMENT_LIMIT, int(max_comments or DEFAULT_SCAN_LIMIT))
+        max_comments = max(tweet_comment_top_limit, int(max_comments or DEFAULT_SCAN_LIMIT))
         output_path = build_output_path("x", f"x_tweet_comments_{time.strftime('%Y%m%d')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
@@ -588,14 +631,16 @@ def run_x_top_comments_spider(
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
                 log_callback(f"[{index}/{len(tweet_urls)}] 读取推文：{tweet_url}")
                 try:
-                    page.goto(tweet_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-                    page.wait_for_selector('article[data-testid="tweet"]', timeout=PAGE_LOAD_TIMEOUT)
-                    time.sleep(3)
+                    page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_load_timeout_val)
+                    page.wait_for_selector('article[data-testid="tweet"]', timeout=page_load_timeout_val)
+                    interruptible_sleep(3, stop_event)
 
-                    comments = extract_comments(page, tweet_url, max_comments, log_callback, stop_event)
-                    rows = build_comment_rows(index, tweet_url, comments)
+                    comments = extract_comments(page, tweet_url, max_comments, log_callback, stop_event, scroll_pause=scroll_pause_val, no_new_scroll_limit=no_new_scroll_limit_val, pause_event=pause_event)
+                    rows = build_comment_rows(index, tweet_url, comments, top_limit=tweet_comment_top_limit)
                     writer.writerows(rows)
                     writer.save()
                     log_callback(f"  完成：扫描主楼评论 {len(comments)} 条，写入点赞量最高的 {len(rows)} 条。")

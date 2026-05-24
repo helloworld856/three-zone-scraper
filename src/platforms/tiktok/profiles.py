@@ -14,6 +14,7 @@ from src.core import (
     random_cooldown,
     sanitize_csv_row,
     should_stop,
+    wait_if_paused,
 )
 
 CSV_FIELDS = ["博主主页链接", "博主名称", "博主ID", "粉丝量", "作者简介"]
@@ -42,7 +43,7 @@ def profile_id_from_url(profile_url: str) -> str:
 def parse_profile_urls(txt_path: str) -> list[str]:
     urls: list[str] = []
     seen = set()
-    with open(txt_path, "r", encoding="utf-8") as f:
+    with open(txt_path, "r", encoding="utf-8-sig") as f:
         for line in f:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -68,13 +69,13 @@ def get_first_text(page, selectors: list[str], timeout: int = 2500) -> str:
             continue
     return ""
 
-def extract_profile_row(page, profile_url: str) -> dict[str, str]:
-    page.goto(profile_url, wait_until="domcontentloaded", timeout=35000)
+def extract_profile_row(page, profile_url: str, page_load_timeout: int = 35000, captcha_wait: int = 12) -> dict[str, str]:
+    page.goto(profile_url, wait_until="domcontentloaded", timeout=page_load_timeout)
     time.sleep(random.uniform(1.4, 2.2))
 
     try:
         if "captcha" in page.url or page.locator("div[id^='captcha']").count() > 0:
-            time.sleep(12)
+            time.sleep(captcha_wait)
     except Exception:
         pass
 
@@ -105,7 +106,12 @@ def extract_profile_row(page, profile_url: str) -> dict[str, str]:
         "作者简介": bio,
     }
 
-def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None):
+def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
+    if config is None:
+        config = {}
+    page_load_timeout = int(config.get("page_load_timeout", 35000))
+    captcha_wait = int(config.get("captcha_wait", 12))
+
     output_path = None
     completed_path = None
     try:
@@ -130,9 +136,11 @@ def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback,
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
                 log_callback(f"[{index}/{len(profile_urls)}] 提取博主信息：{profile_url}")
                 try:
-                    row = extract_profile_row(page, profile_url)
+                    row = extract_profile_row(page, profile_url, page_load_timeout=page_load_timeout, captcha_wait=captcha_wait)
                     log_callback(f"  完成：{row['博主名称']} | {row['博主ID']} | 粉丝 {row['粉丝量'] or '未提取'}")
                 except Exception as exc:
                     row = {

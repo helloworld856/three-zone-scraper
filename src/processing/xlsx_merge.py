@@ -117,8 +117,8 @@ def merge_xlsx_files(
             if file_row_count:
                 merged_files += 1
                 output_wb.save(output_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"警告：跳过文件 {file_path.name}（{exc}）")
         finally:
             if wb is not None:
                 wb.close()

@@ -14,7 +14,16 @@ def judge(
     save_every_batches: int | None = None,
     log_callback=None,
     stop_event=None,
+    pause_event=None,
+    config_overrides: dict | None = None,
 ) -> str:
+    if config_overrides:
+        if "temperature" in config_overrides:
+            config.TEMPERATURE = float(config_overrides["temperature"])
+        if "sleep_seconds" in config_overrides:
+            config.SLEEP_SECONDS = float(config_overrides["sleep_seconds"])
+        if "trust_local_negative_aigc" in config_overrides:
+            config.TRUST_LOCAL_NEGATIVE_AIGC = bool(config_overrides["trust_local_negative_aigc"])
     row_limit = config.ROW_LIMIT if row_limit is None else row_limit
     save_every_batches = config.SAVE_EVERY_BATCHES if save_every_batches is None else save_every_batches
     return run_judge(
@@ -25,6 +34,7 @@ def judge(
         save_every_batches=save_every_batches,
         log_callback=log_callback,
         stop_event=stop_event,
+        pause_event=pause_event,
     )
 
 def main(argv=None):

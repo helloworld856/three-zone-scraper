@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass, field
-from typing import Iterable
 
 
 ALL_CATEGORY = "全部"
@@ -32,7 +31,3 @@ class ToolSpec:
         haystack = " ".join([self.name, self.category, self.summary, " ".join(self.tags)]).lower()
         return query.lower() in haystack
 
-
-def categories_for_tools(tools: Iterable[ToolSpec]) -> list[str]:
-    categories = sorted({tool.category for tool in tools})
-    return [ALL_CATEGORY, *categories]

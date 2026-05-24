@@ -17,13 +17,15 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_sleep,
     random_cooldown,
     should_stop,
+    wait_if_paused,
 )
 from src.platforms.x_twitter.comments import extract_comments
 
 
-CSV_FIELDS = ["序号", "推文链接", "推文的内容", "浏览量", "评论数", "点赞数", "转发量"]
+CSV_FIELDS = ["序号", "推文链接", "推文的内容", "浏览量", "评论数", "点赞量", "转发量"]
 PAGE_LOAD_TIMEOUT = 30000
 COOLDOWN_EVERY = 3
 COOLDOWN_MIN_SECONDS = 3.0
@@ -101,9 +103,11 @@ def article_has_status_id(article, status_id: str) -> bool:
         return False
 
 
-def find_target_article(page, status_id: str):
+def find_target_article(page, status_id: str, page_timeout=None):
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
     try:
-        page.wait_for_selector('article[data-testid="tweet"], article', timeout=PAGE_LOAD_TIMEOUT)
+        page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
     except Exception:
         return None
 
@@ -120,7 +124,7 @@ def find_target_article(page, status_id: str):
 
 def extract_article_payload(article) -> dict[str, str]:
     return article.evaluate(
-        """article => {
+        """async (article) => {
             const firstText = selector => {
                 const node = article.querySelector(selector);
                 return node ? (node.innerText || node.textContent || '').trim() : '';
@@ -145,6 +149,37 @@ def extract_article_payload(article) -> dict[str, str]:
                 return types.length ? `[${types.join('+')}]` : '[非文本]';
             };
 
+            const tweetTextEl = article.querySelector('[data-testid="tweetText"]');
+            if (tweetTextEl) {
+                // Step 1: Revert auto-translation
+                const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
+                const allNodes = article.querySelectorAll('*');
+                for (const node of allNodes) {
+                    const nodeText = (node.textContent || '').trim().toLowerCase();
+                    if (!nodeText || node.children.length > 0) continue;
+                    if (revertTexts.includes(nodeText)) {
+                        try { node.click(); } catch (_) {}
+                        break;
+                    }
+                }
+                // Step 2: Remove CSS truncation
+                tweetTextEl.style.setProperty('max-height', 'none', 'important');
+                tweetTextEl.style.setProperty('overflow', 'visible', 'important');
+                tweetTextEl.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+                tweetTextEl.style.setProperty('display', 'block', 'important');
+                tweetTextEl.style.setProperty('white-space', 'normal', 'important');
+                // Step 3: Click "Show more" if present
+                const expandTexts = ['show more', 'show more...', 'もっと見る', '더 보기'];
+                for (const node of allNodes) {
+                    const nodeText = (node.textContent || '').trim().toLowerCase();
+                    if (!nodeText || node.children.length > 0) continue;
+                    if (!expandTexts.includes(nodeText)) continue;
+                    try { node.click(); } catch (_) {}
+                    break;
+                }
+                // Wait for React to re-render with original text
+                await new Promise(r => setTimeout(r, 400));
+            }
             const content = firstText('[data-testid="tweetText"]') || nonTextContent();
             return {
                 content,
@@ -163,16 +198,18 @@ def extract_article_payload(article) -> dict[str, str]:
     )
 
 
-def collect_tweet_metrics(page, tweet_url: str) -> dict[str, str]:
+def collect_tweet_metrics(page, tweet_url: str, page_timeout=None, stop_event=None) -> dict[str, str]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
     normalized_url = clean_tweet_url(tweet_url)
     status_id = extract_status_id(normalized_url)
     if not status_id:
         raise ValueError("无法解析推文 ID")
 
-    page.goto(normalized_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-    time.sleep(2.5)
+    page.goto(normalized_url, wait_until="domcontentloaded", timeout=page_timeout)
+    interruptible_sleep(2.5, stop_event)
 
-    article = find_target_article(page, status_id)
+    article = find_target_article(page, status_id, page_timeout=page_timeout)
     if article is None:
         raise RuntimeError("未找到目标推文 DOM")
 
@@ -182,7 +219,7 @@ def collect_tweet_metrics(page, tweet_url: str) -> dict[str, str]:
         "推文的内容": payload.get("content", ""),
         "浏览量": normalize_metric_text(payload.get("views", "")),
         "评论数": normalize_interaction_metric(payload.get("replies", "")),
-        "点赞数": normalize_interaction_metric(payload.get("likes", "")),
+        "点赞量": normalize_interaction_metric(payload.get("likes", "")),
         "转发量": normalize_interaction_metric(payload.get("reposts", "")),
     }
 
@@ -195,7 +232,14 @@ def run_x_tweet_metrics_spider(
     log_callback=None,
     finish_callback=None,
     stop_event=None,
+    config=None,
+    pause_event=None,
 ):
+    if config is None:
+        config = {}
+    page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    tweet_comment_top_limit = int(config.get("tweet_comment_top_limit", 100))
+
     completed_path = None
     page = None
     try:
@@ -209,7 +253,7 @@ def run_x_tweet_metrics_spider(
             return
 
         get_comments_bool = get_comments_str == "是"
-        max_comments_val = max(10, int(max_comments))
+        scan_limit = max(int(max_comments), tweet_comment_top_limit)
 
         output_path = build_output_path("x", f"x_tweet_metrics_{time.strftime('%Y%m%d')}.xlsx")
         if get_comments_bool:
@@ -232,6 +276,8 @@ def run_x_tweet_metrics_spider(
                 if should_stop(stop_event):
                     log_line(log_callback, "任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
 
                 normalized_url = clean_tweet_url(tweet_url)
                 row = {
@@ -240,17 +286,18 @@ def run_x_tweet_metrics_spider(
                     "推文的内容": "",
                     "浏览量": "",
                     "评论数": "",
-                    "点赞数": "",
+                    "点赞量": "",
                     "转发量": "",
                 }
                 log_line(log_callback, f"[{index}/{len(tweet_urls)}] 读取推文：{normalized_url}")
                 try:
-                    row.update(collect_tweet_metrics(page, normalized_url))
+                    row.update(collect_tweet_metrics(page, normalized_url, page_timeout=page_load_timeout_val, stop_event=stop_event))
                     
                     if get_comments_bool:
                         try:
-                            comments = extract_comments(page, normalized_url, max_comments_val, log_callback, stop_event)
-                            for comment in comments:
+                            comments = extract_comments(page, normalized_url, scan_limit, log_callback, stop_event, pause_event=pause_event)
+                            comments.sort(key=lambda item: int(item.get("likes", "0") or 0), reverse=True)
+                            for comment in comments[:tweet_comment_top_limit]:
                                 comment_row = {
                                     "序号": row["序号"],
                                     "推文链接": normalized_url,

@@ -18,10 +18,12 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_sleep,
     random_cooldown,
     sanitize_csv_row,
     sanitize_csv_rows,
     should_stop,
+    wait_if_paused,
 )
 
 
@@ -144,8 +146,9 @@ def has_more_comments(value: Any) -> bool:
 
 
 class CommentCollector:
-    def __init__(self, max_scan_comments: int, log_callback) -> None:
-        self.max_scan_comments = max(TOP_COMMENT_LIMIT, int(max_scan_comments or DEFAULT_SCAN_LIMIT))
+    def __init__(self, max_scan_comments: int, log_callback, comment_top_limit: int | None = None) -> None:
+        self.comment_top_limit = comment_top_limit if comment_top_limit is not None else TOP_COMMENT_LIMIT
+        self.max_scan_comments = max(self.comment_top_limit, int(max_scan_comments or DEFAULT_SCAN_LIMIT))
         self.log_callback = log_callback
         self.comments: list[dict[str, Any]] = []
         self.seen_ids: set[str] = set()
@@ -278,6 +281,10 @@ class CommentCollector:
             if added:
                 self.log_callback(f"  接口返回新增主楼评论 {added} 条，累计 {len(self.comments)} 条。")
         except Exception:
+            import logging
+            _logger = logging.getLogger(__name__)
+            _logger.warning("handle_response failed for %s (will continue silently)", response.url)
+            _logger.debug("handle_response failed", exc_info=True)
             return
 
 
@@ -652,15 +659,18 @@ def wait_for_tiktok_runtime(page) -> None:
         pass
 
 
-def fetch_comments_via_page_api(page, video_id: str, collector: CommentCollector, log_callback, stop_event=None) -> int:
+def fetch_comments_via_page_api(page, video_id: str, collector: CommentCollector, log_callback, stop_event=None, pause_event=None, max_scroll_rounds: int | None = None) -> int:
     if not video_id:
         return 0
 
     wait_for_tiktok_runtime(page)
     cursor: Any = 0
     total_added = 0
-    for _ in range(MAX_SCROLL_ROUNDS):
+    _max_rounds = max_scroll_rounds if max_scroll_rounds is not None else MAX_SCROLL_ROUNDS
+    for _ in range(_max_rounds):
         if should_stop(stop_event) or len(collector.comments) >= collector.max_scan_comments:
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
 
         count = min(50, collector.max_scan_comments - len(collector.comments))
@@ -772,29 +782,32 @@ def fetch_comments_via_page_api(page, video_id: str, collector: CommentCollector
         if not has_more_comments(data.get("has_more")) or not next_cursor or str(next_cursor) == str(cursor):
             break
         cursor = next_cursor
-        time.sleep(0.4)
+        interruptible_sleep(0.4, stop_event)
 
     return total_added
 
 
-def collect_video_comments(page, video_url: str, max_scan_comments: int, log_callback, stop_event=None) -> list[dict[str, Any]]:
-    collector = CommentCollector(max_scan_comments, log_callback)
+def collect_video_comments(page, video_url: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, comment_top_limit: int | None = None, page_load_timeout: int | None = None, scroll_pause: float | None = None, max_scroll_rounds: int | None = None) -> list[dict[str, Any]]:
+    collector = CommentCollector(max_scan_comments, log_callback, comment_top_limit=comment_top_limit)
     video_id = extract_video_id(video_url)
+    _page_timeout = page_load_timeout if page_load_timeout is not None else PAGE_LOAD_TIMEOUT
+    _scroll_pause = scroll_pause if scroll_pause is not None else SCROLL_PAUSE
+    _max_scroll_rounds = max_scroll_rounds if max_scroll_rounds is not None else MAX_SCROLL_ROUNDS
     page.on("response", collector.handle_response)
     try:
-        page.goto(video_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+        page.goto(video_url, wait_until="domcontentloaded", timeout=_page_timeout)
         time.sleep(2.5)
         if looks_blocked_or_captcha(page):
             log_callback("  跳过：疑似验证码或风控页面。")
             return []
 
-        api_added = fetch_comments_via_page_api(page, video_id, collector, log_callback, stop_event=stop_event)
+        api_added = fetch_comments_via_page_api(page, video_id, collector, log_callback, stop_event=stop_event, pause_event=pause_event, max_scroll_rounds=_max_scroll_rounds)
         opened = False
         if len(collector.comments) == 0:
             opened = open_comment_panel(page)
         if not opened and api_added == 0 and len(collector.comments) < collector.max_scan_comments:
             log_callback("  评论入口未能打开，改用页面上下文评论接口。")
-            fetch_comments_via_page_api(page, video_id, collector, log_callback, stop_event=stop_event)
+            fetch_comments_via_page_api(page, video_id, collector, log_callback, stop_event=stop_event, pause_event=pause_event, max_scroll_rounds=_max_scroll_rounds)
         if opened:
             log_callback("  已点击评论入口。")
 
@@ -808,14 +821,16 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
         if use_dom_fallback:
             collect_visible_dom_comments(page, collector, log_callback)
         if opened and api_added == 0 and len(collector.comments) < collector.max_scan_comments:
-            fetch_comments_via_page_api(page, video_id, collector, log_callback, stop_event=stop_event)
+            fetch_comments_via_page_api(page, video_id, collector, log_callback, stop_event=stop_event, pause_event=pause_event, max_scroll_rounds=_max_scroll_rounds)
             use_dom_fallback = len(collector.comments) == 0
 
         no_new_rounds = 0
         last_count = len(collector.comments)
-        for round_index in range(MAX_SCROLL_ROUNDS):
+        for round_index in range(_max_scroll_rounds):
             if should_stop(stop_event):
                 log_callback("  任务已停止。")
+                break
+            if wait_if_paused(pause_event, stop_event):
                 break
             if len(collector.comments) >= collector.max_scan_comments:
                 break
@@ -825,7 +840,7 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
                 break
 
             scroll_comments(page)
-            time.sleep(SCROLL_PAUSE)
+            interruptible_sleep(_scroll_pause, stop_event)
             collect_visible_dom_comments(page, collector, log_callback)
 
             current_count = len(collector.comments)
@@ -849,7 +864,8 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
             pass
 
 
-def build_top_rows(video_index: str, video_url: str, comments: list[dict[str, Any]]) -> list[dict[str, str]]:
+def build_top_rows(video_index: str, video_url: str, comments: list[dict[str, Any]], comment_top_limit: int | None = None) -> list[dict[str, str]]:
+    top_limit = comment_top_limit if comment_top_limit is not None else TOP_COMMENT_LIMIT
     top_comments = sorted(comments, key=lambda item: (-int(item.get("like_count", 0) or 0), int(item.get("order", 0) or 0)))
     return [
         {
@@ -859,7 +875,7 @@ def build_top_rows(video_index: str, video_url: str, comments: list[dict[str, An
             "评论内容": str(comment.get("text") or ""),
             "发布时间": str(comment.get("create_time") or ""),
         }
-        for comment in top_comments[:TOP_COMMENT_LIMIT]
+        for comment in top_comments[:top_limit]
     ]
 
 
@@ -874,7 +890,16 @@ def run_tiktok_top_comments_spider(
     log_callback,
     finish_callback,
     stop_event=None,
+    pause_event=None,
+    config=None,
 ):
+    if config is None:
+        config = {}
+    comment_top_limit = int(config.get("tiktok_comment_top_limit", TOP_COMMENT_LIMIT))
+    config_page_load_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    config_scroll_pause = float(config.get("scroll_pause", SCROLL_PAUSE))
+    config_max_scroll_rounds = int(config.get("max_scroll_rounds", MAX_SCROLL_ROUNDS))
+
     completed_path = None
     page = None
     try:
@@ -887,11 +912,11 @@ def run_tiktok_top_comments_spider(
             log_callback("TXT 中没有找到有效的 TikTok 视频链接。")
             return
 
-        max_scan_comments = max(TOP_COMMENT_LIMIT, int(max_scan_comments or DEFAULT_SCAN_LIMIT))
+        max_scan_comments = max(comment_top_limit, int(max_scan_comments or DEFAULT_SCAN_LIMIT))
         output_path = build_output_path("tiktok", f"tiktok_top_comments_{time.strftime('%Y%m%d')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
         log_callback(f"输出文件：{output_path}")
-        log_callback(f"最多扫描主楼评论数：{max_scan_comments}，每个视频输出点赞量前 {TOP_COMMENT_LIMIT} 条。")
+        log_callback(f"最多扫描主楼评论数：{max_scan_comments}，每个视频输出点赞量前 {comment_top_limit} 条。")
 
         with sync_playwright() as playwright:
             log_callback("正在连接本地 Chrome...")
@@ -906,13 +931,15 @@ def run_tiktok_top_comments_spider(
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
 
                 video_index = entry["编号"]
                 video_url = entry["视频链接"]
                 log_callback(f"[{progress_index}/{len(entries)}] 读取评论：{video_url}")
                 try:
-                    comments = collect_video_comments(page, video_url, max_scan_comments, log_callback, stop_event)
-                    rows = build_top_rows(video_index, video_url, comments)
+                    comments = collect_video_comments(page, video_url, max_scan_comments, log_callback, stop_event, pause_event=pause_event, comment_top_limit=comment_top_limit, page_load_timeout=config_page_load_timeout, scroll_pause=config_scroll_pause, max_scroll_rounds=config_max_scroll_rounds)
+                    rows = build_top_rows(video_index, video_url, comments, comment_top_limit=comment_top_limit)
                     if not rows:
                         rows = [empty_video_row(video_index, video_url)]
                     writer.writerows(sanitize_csv_rows(rows))

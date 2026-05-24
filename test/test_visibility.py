@@ -29,12 +29,12 @@ def test_visibility():
         if limit_combo:
             start_date_widget = window.widgets.get("start_date")
             print(f"  Default limit_time: {limit_combo.currentText()}")
-            print(f"  Start date visible: {start_date_widget.isVisible()}")
-            
+            print(f"  Start date hidden: {start_date_widget.isHidden()}")
+
             limit_combo.setCurrentText("否")
             print("  Changed limit_time to '否'")
-            print(f"  Start date visible: {start_date_widget.isVisible()}")
-            
+            print(f"  Start date hidden: {start_date_widget.isHidden()}")
+
             limit_combo.setCurrentText("是")
         else:
             print("  No limit_time field")
@@ -43,11 +43,11 @@ def test_visibility():
         if get_comments_combo:
             max_comments_widget = window.widgets.get("max_comments")
             print(f"  Default get_comments: {get_comments_combo.currentText()}")
-            print(f"  max_comments visible: {max_comments_widget.isVisible()}")
-            
+            print(f"  max_comments hidden: {max_comments_widget.isHidden()}")
+
             get_comments_combo.setCurrentText("是")
             print("  Changed get_comments to '是'")
-            print(f"  max_comments visible: {max_comments_widget.isVisible()}")
+            print(f"  max_comments hidden: {max_comments_widget.isHidden()}")
         else:
             print("  No get_comments field")
 

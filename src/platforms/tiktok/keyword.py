@@ -17,10 +17,12 @@ from src.core import (
     connect_existing_chromium,
     expand_compact_number,
     extract_tiktok_video_title,
+    interruptible_sleep,
     random_cooldown,
     resolve_tiktok_card_container,
     sanitize_csv_row,
     should_stop,
+    wait_if_paused,
 )
 from src.platforms.tiktok.comments import collect_video_comments
 
@@ -278,8 +280,8 @@ def extract_card_play_count(anchor) -> str:
         pass
     return ""
 
-def dynamic_search_scroll_limit(max_videos: int) -> int:
-    return min(MAX_SEARCH_SCROLLS, max(MIN_SEARCH_SCROLLS, max_videos // 8 + 40))
+def dynamic_search_scroll_limit(max_videos: int, max_search_scrolls: int = MAX_SEARCH_SCROLLS) -> int:
+    return min(max_search_scrolls, max(MIN_SEARCH_SCROLLS, max_videos // 8 + 40))
 
 def default_candidate_scan_limit(max_videos: int) -> int:
     return max(max_videos, min(max_videos * DEFAULT_CANDIDATE_MULTIPLIER, max_videos + 3000))
@@ -365,7 +367,14 @@ def extract_video_row(page, keyword: str, video_url: str, play_count: str = "") 
         "博主主页链接": extract_author_url(video_url),
     }
 
-def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str, start_date, end_date, get_comments_str, max_comments, cdp_port_or_url, log_callback, finish_callback, stop_event=None):
+def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str, start_date, end_date, get_comments_str, max_comments, cdp_port_or_url, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
+    if config is None:
+        config = {}
+    search_scroll_pause = float(config.get("search_scroll_pause", SEARCH_SCROLL_PAUSE))
+    config_max_search_scrolls = int(config.get("max_search_scrolls", MAX_SEARCH_SCROLLS))
+    no_new_scroll_limit = int(config.get("no_new_scroll_limit", 12))
+    comment_top_limit = int(config.get("tiktok_comment_top_limit", 100))
+
     output_path = None
     output_paths: list[str] = []
     try:
@@ -391,6 +400,8 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
                 output_path = build_output_path(
                     "tiktok",
                     f"tiktok_keyword_videos_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
@@ -410,7 +421,7 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                 serial_number = 1
 
                 open_search_page(search_page, keyword)
-                scroll_limit = dynamic_search_scroll_limit(max_videos)
+                scroll_limit = dynamic_search_scroll_limit(max_videos, config_max_search_scrolls)
                 seen_links: set[str] = set()
                 scanned_count = 0
                 no_new_visible_rounds = 0
@@ -421,6 +432,8 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                     if should_stop(stop_event):
                         log_callback("  已请求停止，结束当前关键词。")
                         break
+                    if wait_if_paused(pause_event, stop_event):
+                        break
                     new_items = collect_visible_video_items(search_page, seen_links)
                     if not new_items:
                         no_new_visible_rounds += 1
@@ -429,6 +442,8 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
 
                     for video_item in new_items:
                         if should_stop(stop_event):
+                            break
+                        if wait_if_paused(pause_event, stop_event):
                             break
                         if written_count >= max_videos:
                             break
@@ -448,7 +463,7 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                             row["序号"] = str(serial_number)
                             
                             if get_comments_bool:
-                                comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event)
+                                comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event, pause_event=pause_event, comment_top_limit=comment_top_limit)
                                 writer.writerow("视频信息", sanitize_csv_row(row))
                                 for comment in comments:
                                     comment_row = {
@@ -475,14 +490,14 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                     if scanned_count >= max_candidates:
                         log_callback(f"  已检查 {scanned_count} 个候选，达到候选检查上限，停止当前关键词。")
                         break
-                    if no_new_visible_rounds >= 12 and scroll_index >= 20:
+                    if no_new_visible_rounds >= no_new_scroll_limit and scroll_index >= 20:
                         log_callback("  连续多轮没有新视频链接，停止当前关键词。")
                         break
                     if scroll_index and scroll_index % 10 == 0:
                         log_callback(f"  已滚动 {scroll_index}/{scroll_limit} 轮，已扫描 {scanned_count} 个候选，写入 {written_count} 条")
 
                     trigger_search_lazy_load(search_page)
-                    time.sleep(SEARCH_SCROLL_PAUSE)
+                    interruptible_sleep(search_scroll_pause, stop_event)
                 log_callback(f"  写入 {written_count} 条日期范围内的视频")
                 writer.save()
 

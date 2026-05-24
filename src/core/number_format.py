@@ -35,7 +35,7 @@ def expand_compact_number(value, default: str = "") -> str:
     unit = (match.group("unit") or "").lower()
     try:
         number = Decimal(number_text)
-    except Exception:
+    except (ValueError, ArithmeticError):
         return text
 
     multiplier = _UNIT_MULTIPLIERS.get(unit, Decimal("1"))

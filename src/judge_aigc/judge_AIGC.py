@@ -4,12 +4,12 @@
 import json
 import re
 import os
-import time
 import openpyxl
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TypedDict, List, Any, Dict, Set, Callable
 
 from .config import config
+from src.core import interruptible_sleep, wait_if_paused
 
 
 class State(TypedDict):
@@ -33,7 +33,6 @@ AIGC_KEYWORDS = (
     "aigc",
     "ai実写化",
     "aiアニメ",
-    "ai生成",
     "ai作成",
     "ai動画",
     "ai実写",
@@ -259,8 +258,11 @@ def parse_ai_json(json_text: str, batch_index: int):
     except json.JSONDecodeError as e:
         bad_file = f"bad_response_batch_{batch_index}.txt"
 
-        with open(bad_file, "w", encoding="utf-8") as f:
-            f.write(json_text)
+        try:
+            with open(bad_file, "w", encoding="utf-8") as f:
+                f.write(json_text)
+        except OSError:
+            print(f"无法写入错误文件，原始返回：{json_text[:500]}...")
 
         print("=" * 80)
         print(f"第 {batch_index} 批 JSON 解析失败。")
@@ -305,7 +307,7 @@ def detect_language_locally(title: str) -> str:
     hira_kata = sum(
         1
         for char in title
-        if "\u3040" <= char <= "\u30ff" or "\u31f0" <= char <= "\u31ff"
+        if "\u3041" <= char <= "\u30ff" or "\u31f0" <= char <= "\u31ff"
     )
     hangul = sum(1 for char in title if "\uac00" <= char <= "\ud7af")
     thai = sum(1 for char in title if "\u0e00" <= char <= "\u0e7f")
@@ -532,9 +534,17 @@ def process_batch(batch_index: int, lines: List[List[Any]], max_workers: int = 1
                     for chunk_index, chunk in enumerate(chunks, start=1)
                 }
                 for future in as_completed(futures):
-                    indexed_results[futures[future]] = future.result()
+                    try:
+                        result = future.result(timeout=300)
+                    except TimeoutError:
+                        import logging
+                        logging.getLogger(__name__).error("Batch chunk timed out after 300s")
+                        result = None
+                    indexed_results[futures[future]] = result
             for chunk_index in sorted(indexed_results):
-                ai_response.extend(indexed_results[chunk_index])
+                chunk_result = indexed_results[chunk_index]
+                if chunk_result is not None:
+                    ai_response.extend(chunk_result)
 
     result_rows = merge_ai_rows(local_rows, ai_response)
     return validate_result_rows(
@@ -552,6 +562,7 @@ def run_judge(
     save_every_batches: int | None = None,
     log_callback: Callable[[str], None] | None = None,
     stop_event=None,
+    pause_event=None,
 ):
     input_txt_path = input_txt_path or config.INPUT_TXT_PATH
     output_excel_path = output_excel_path or config.OUTPUT_EXCEL_PATH
@@ -595,6 +606,8 @@ def run_judge(
             if stopped():
                 log("任务已停止。")
                 break
+            if wait_if_paused(pause_event, stop_event):
+                break
 
             batch_count += 1
             total_count += len(lines)
@@ -631,7 +644,7 @@ def run_judge(
             )
 
             if config.SLEEP_SECONDS > 0:
-                time.sleep(config.SLEEP_SECONDS)
+                interruptible_sleep(config.SLEEP_SECONDS, stop_event)
 
         wb.save(output_excel_path)
     except Exception:

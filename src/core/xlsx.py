@@ -56,14 +56,12 @@ class XlsxRowWriter:
     def save(self):
         temp_path = f"{self.output_path}.tmp"
         self.workbook.save(temp_path)
-        os.replace(temp_path, self.output_path)
+        try:
+            os.replace(temp_path, self.output_path)
+        except OSError:
+            self.workbook.save(self.output_path)
         self._rows_since_save = 0
 
-
-def write_xlsx_rows(output_path: str, fieldnames: Iterable[str], rows: Iterable[Mapping[str, Any]], sheet_name: str = "数据"):
-    writer = XlsxRowWriter(output_path, fieldnames, sheet_name=sheet_name)
-    writer.writerows(rows)
-    writer.save()
 
 
 class MultiSheetXlsxWriter:
@@ -94,6 +92,8 @@ class MultiSheetXlsxWriter:
 
     def writerow(self, sheet_name: str, row: Mapping[str, Any]):
         if sheet_name not in self.worksheets:
+            import logging
+            logging.getLogger(__name__).warning("writerow: sheet '%s' not registered, row skipped", sheet_name)
             return
         fieldnames = self.sheets_fields[sheet_name]
         ws = self.worksheets[sheet_name]
@@ -105,6 +105,9 @@ class MultiSheetXlsxWriter:
     def save(self):
         temp_path = f"{self.output_path}.tmp"
         self.workbook.save(temp_path)
-        os.replace(temp_path, self.output_path)
+        try:
+            os.replace(temp_path, self.output_path)
+        except OSError:
+            self.workbook.save(self.output_path)
         self._rows_since_save = 0
 

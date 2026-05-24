@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from googleapiclient.discovery import build
 
-from src.core import XlsxRowWriter, MultiSheetXlsxWriter, build_output_path, sanitize_csv_rows, should_stop
+from src.core import XlsxRowWriter, MultiSheetXlsxWriter, build_output_path, sanitize_csv_rows, should_stop, wait_if_paused
 from src.platforms.youtube.comments import fetch_top_level_comments
 
 CSV_FIELDS = [
@@ -21,8 +21,8 @@ CSV_FIELDS = [
     "作者主页链接",
 ]
 
-DEFAULT_START_DATE = "2025-05-06"
-DEFAULT_END_DATE = "2026-05-06"
+DEFAULT_START_DATE = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+DEFAULT_END_DATE = datetime.now().strftime("%Y-%m-%d")
 
 def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime]:
     start_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -56,42 +56,7 @@ def safe_filename_part(value: str) -> str:
     cleaned = re.sub(r"\s+", "_", cleaned)
     return cleaned[:80] or "keyword"
 
-def search_video_ids(youtube, keyword: str, max_results: int, start_dt: datetime, end_dt: datetime, log_callback, stop_event=None) -> list[str]:
-    video_ids: list[str] = []
-    next_page_token = None
-    published_before = end_dt + timedelta(days=1)
-
-    while len(video_ids) < max_results:
-        if should_stop(stop_event):
-            log_callback("任务已停止。")
-            break
-        response = youtube.search().list(
-            part="id",
-            q=keyword,
-            type="video",
-            order="relevance",
-            maxResults=min(50, max_results - len(video_ids)),
-            pageToken=next_page_token,
-            publishedAfter=youtube_rfc3339(start_dt),
-            publishedBefore=youtube_rfc3339(published_before),
-        ).execute()
-
-        for item in response.get("items", []):
-            if should_stop(stop_event):
-                break
-            video_id = item.get("id", {}).get("videoId", "")
-            if video_id and video_id not in video_ids:
-                video_ids.append(video_id)
-
-        next_page_token = response.get("nextPageToken")
-        log_callback(f"  {keyword}: 已找到 {len(video_ids)} 个日期范围内的视频")
-        if not next_page_token:
-            break
-
-    return video_ids
-
-
-def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_time_bool: bool, start_dt: datetime | None, end_dt: datetime | None, log_callback, stop_event=None):
+def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_time_bool: bool, start_dt: datetime | None, end_dt: datetime | None, log_callback, stop_event=None, pause_event=None, batch_size: int = 50):
     seen_video_ids: set[str] = set()
     next_page_token = None
 
@@ -99,13 +64,15 @@ def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_
         if should_stop(stop_event):
             log_callback("任务已停止。")
             break
-            
+        if wait_if_paused(pause_event, stop_event):
+            break
+
         params = {
             "part": "id",
             "q": keyword,
             "type": "video",
             "order": "relevance",
-            "maxResults": min(50, max_results - len(seen_video_ids)),
+            "maxResults": min(batch_size, max_results - len(seen_video_ids)),
             "pageToken": next_page_token,
         }
         if limit_time_bool and start_dt and end_dt:
@@ -131,10 +98,12 @@ def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_
         if not next_page_token:
             break
 
-def fetch_video_rows(youtube, keyword: str, video_ids: list[str], stop_event=None) -> list[dict]:
+def fetch_video_rows(youtube, keyword: str, video_ids: list[str], stop_event=None, pause_event=None, batch_size: int = 50) -> list[dict]:
     rows: list[dict] = []
-    for ids in chunked(video_ids, 50):
+    for ids in chunked(video_ids, batch_size):
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         response = youtube.videos().list(
             part="snippet,contentDetails,statistics",
@@ -165,7 +134,12 @@ def fetch_video_rows(youtube, keyword: str, video_ids: list[str], stop_event=Non
             )
     return rows
 
-def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, start_date, end_date, get_comments_str, max_comments, log_callback, finish_callback, stop_event=None):
+def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, start_date, end_date, get_comments_str, max_comments, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+    if config is None:
+        config = {}
+    search_batch_size = int(config.get("youtube_search_batch_size", 50))
+    video_batch_size = int(config.get("youtube_video_batch_size", 50))
+    comment_top_limit = int(config.get("youtube_comment_top_limit", 100))
     output_path = None
     output_paths: list[str] = []
     try:
@@ -174,13 +148,15 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
         start_dt, end_dt = None, None
         if limit_time_bool:
             start_dt, end_dt = parse_date_range(start_date, end_date)
-            
+
         youtube = build("youtube", "v3", developerKey=api_key)
         run_stamp = time.strftime("%Y%m%d")
 
         for index, keyword in enumerate(keywords_list, 1):
             if should_stop(stop_event):
                 log_callback("任务已停止。")
+                break
+            if wait_if_paused(pause_event, stop_event):
                 break
             output_path = build_output_path(
                 "youtube",
@@ -201,19 +177,19 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
             else:
                 log_callback("  日期范围：不限时间")
             written_count = 0
-            for video_ids in iter_search_video_id_batches(youtube, keyword, max_results, limit_time_bool, start_dt, end_dt, log_callback, stop_event):
+            for video_ids in iter_search_video_id_batches(youtube, keyword, max_results, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event, search_batch_size):
                 if should_stop(stop_event):
                     break
-                rows = fetch_video_rows(youtube, keyword, video_ids, stop_event)
+                rows = fetch_video_rows(youtube, keyword, video_ids, stop_event, pause_event, video_batch_size)
                 for row in rows:
                     row["序号"] = str(serial_number)
                     
                     if get_comments_bool:
                         try:
-                            video_id = row["视频链接"].split("v=")[1]
-                            comments = fetch_top_level_comments(youtube, video_id, max_comments, log_callback, stop_event)
+                            video_id = (row["视频链接"].split("v=")[1] if "v=" in row["视频链接"] else "").split("&")[0]
+                            comments = fetch_top_level_comments(youtube, video_id, max_comments, log_callback, stop_event, pause_event)
                             comments.sort(key=lambda item: item["like_count"], reverse=True)
-                            for comment in comments[:max_comments]:
+                            for comment in comments[:comment_top_limit]:
                                 comment_row = {
                                     "序号": row["序号"],
                                     "视频链接": row["视频链接"],

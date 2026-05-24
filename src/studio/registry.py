@@ -158,15 +158,6 @@ TOOLS: list[ToolSpec] = [
         tags=("Instagram", "profile", "works", "posts", "reels"),
     ),
     ToolSpec(
-        tool_id="facebook_profile_works",
-        name="Facebook 作者主页作品采集",
-        category="Facebook",
-        summary="按作者主页链接滚动采集公开作品，导出作品ID、链接、发布时间、内容和可识别指标。",
-        entrypoint="src.platforms.facebook.windows.FacebookProfileWorksWindow",
-        implementation_path="platforms/facebook/works.py",
-        tags=("Facebook", "profile", "works", "posts", "reels"),
-    ),
-    ToolSpec(
         tool_id="judge_aigc",
         name="AIGC 标题判断",
         category="数据处理",

@@ -18,18 +18,28 @@ from src.core import (
     MultiSheetXlsxWriter,
     build_output_path,
     connect_existing_chromium,
+    expand_compact_number,
+    interruptible_sleep,
     sanitize_csv_cell,
     should_stop,
+    wait_if_paused,
 )
 from src.platforms.x_twitter.comments import extract_comments
-from src.platforms.tiktok.keyword import parse_date_range
 
 
-CSV_FIELDS = ["序号", "帖子ID", "发布时间", "帖子内容", "帖子链接"]
+def _parse_date_range(start_str: str, end_str: str):
+    from datetime import datetime
+    start_dt = datetime.strptime(start_str, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_str, "%Y-%m-%d")
+    if start_dt > end_dt:
+        raise ValueError(f"开始日期 {start_str} 晚于结束日期 {end_str}")
+    return start_dt, end_dt
+
+
+CSV_FIELDS = ["序号", "帖子ID", "发布时间", "帖子内容", "浏览量", "点赞量", "转发量", "评论数", "帖子链接", "博主链接"]
 PAGE_LOAD_TIMEOUT = 30000
 INITIAL_LOAD_DELAY = 2.0
-SCROLL_DELAY = 1.2
-SLOW_SCROLL_DELAY = 2.2
+SCROLL_DELAY = 3.2
 SCROLL_PX = 2800
 NO_NEW_SCROLL_LIMIT = 10
 DEFAULT_MAX_SCROLLS = 300
@@ -45,6 +55,8 @@ BLOCKED_PROFILE_NAMES = {
     "i",
     "search",
     "settings",
+    "signup",
+    "login",
 }
 
 
@@ -107,6 +119,10 @@ def normalize_tweet(tweet: dict[str, str]) -> dict[str, str]:
         "post_id": str(sanitize_csv_cell(post_id)),
         "published_at": str(sanitize_csv_cell(format_tweet_time(tweet.get("publishedAt", tweet.get("published_at", ""))))),
         "content": str(sanitize_csv_cell(tweet.get("content", ""))),
+        "views": str(sanitize_csv_cell(expand_compact_number(tweet.get("views", "")))),
+        "likes": str(sanitize_csv_cell(expand_compact_number(tweet.get("likes", "")))),
+        "retweets": str(sanitize_csv_cell(expand_compact_number(tweet.get("retweets", "")))),
+        "replies": str(sanitize_csv_cell(expand_compact_number(tweet.get("replies", "")))),
         "url": str(sanitize_csv_cell(tweet.get("url", ""))),
     }
 
@@ -117,18 +133,31 @@ def row_from_tweet(index: int, tweet: dict[str, str]) -> dict[str, str]:
         "帖子ID": tweet.get("post_id") or tweet.get("postId", ""),
         "发布时间": tweet.get("published_at") or tweet.get("publishedAt", ""),
         "帖子内容": tweet.get("content", ""),
+        "浏览量": tweet.get("views", ""),
+        "点赞量": tweet.get("likes", ""),
+        "转发量": tweet.get("retweets", ""),
+        "评论数": tweet.get("replies", ""),
         "帖子链接": tweet.get("url", ""),
+        "博主链接": tweet.get("profile_url", ""),
     }
 
 
-def cooldown_after_batch(total_written: int, log_callback, stop_event=None):
-    if total_written <= 0 or total_written % SAVE_BATCH_SIZE != 0:
+def cooldown_after_batch(total_written: int, log_callback, stop_event=None, pause_event=None, save_batch_size=None, cooldown_min=None, cooldown_max=None):
+    if save_batch_size is None:
+        save_batch_size = SAVE_BATCH_SIZE
+    if cooldown_min is None:
+        cooldown_min = COOLDOWN_MIN_SECONDS
+    if cooldown_max is None:
+        cooldown_max = COOLDOWN_MAX_SECONDS
+    if total_written <= 0 or total_written % save_batch_size != 0:
         return
-    seconds = random.uniform(COOLDOWN_MIN_SECONDS, COOLDOWN_MAX_SECONDS)
+    seconds = random.uniform(cooldown_min, cooldown_max)
     log_line(log_callback, f"  已保存 {total_written} 条帖子，随机等待 {seconds:.1f} 秒。")
     deadline = time.time() + seconds
     while time.time() < deadline:
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         time.sleep(min(0.5, deadline - time.time()))
 
@@ -136,7 +165,7 @@ def cooldown_after_batch(total_written: int, log_callback, stop_event=None):
 def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
     username_lc = username.lower().lstrip("@")
     return page.evaluate(
-        """({ username }) => {
+        """async ({ username }) => {
             const results = [];
             const normalize = value => (value || '').trim().replace(/^@/, '').toLowerCase();
             const ownStatus = article => {
@@ -163,7 +192,35 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
                 if (article.querySelector('[data-testid="card.wrapper"], [data-testid="card.layoutLarge.media"], [data-testid="card.layoutSmall.media"]')) types.push('卡片');
                 return types.length ? `[${types.join('+')}]` : '[非文本]';
             };
+            const ariaMetric = (root, testIds) => {
+                for (const id of testIds) {
+                    const el = root.querySelector(`[data-testid="${id}"]`);
+                    if (!el) continue;
+                    const rawText = (el.innerText || el.textContent || '').trim();
+                    if (rawText && /\\d/.test(rawText)) return rawText;
+                    const aria = el.getAttribute('aria-label') || '';
+                    const match = aria ? aria.match(/([\\d,]+(\\.\\d+)?\\s*[KkMmBb]?)/) : null;
+                    if (match) return match[1].replace(/,/g, '');
+                }
+                return '';
+            };
+            const firstMetric = (root, selectors) => {
+                for (const selector of selectors) {
+                    const el = root.querySelector(selector);
+                    if (!el) continue;
+                    const rawText = (el.innerText || el.textContent || '').trim();
+                    if (rawText && /\\d/.test(rawText)) return rawText;
+                    const aria = el.getAttribute('aria-label') || '';
+                    const match = aria ? aria.match(/([\\d,]+(\\.\\d+)?\\s*[KkMmBb]?)/) : null;
+                    if (match) return match[1].replace(/,/g, '');
+                }
+                return '';
+            };
 
+            // Phase 1: collect matching articles and apply mutations
+            const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
+            const expandTexts = ['show more', 'show more...', 'もっと見る', '더 보기'];
+            const articles = [];
             for (const article of document.querySelectorAll('article[data-testid="tweet"], article')) {
                 try {
                     if (isPromoted(article)) continue;
@@ -171,16 +228,62 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
                     if (!info.postId || normalize(info.handle) !== username) continue;
 
                     const textEl = article.querySelector('[data-testid="tweetText"]');
-                    const text = textEl ? (textEl.innerText || textEl.textContent || '').trim() : '';
+                    if (textEl) {
+                        const allNodes = article.querySelectorAll('*');
+                        for (const node of allNodes) {
+                            const nodeText = (node.textContent || '').trim().toLowerCase();
+                            if (!nodeText || node.children.length > 0) continue;
+                            if (revertTexts.includes(nodeText)) {
+                                try { node.click(); } catch (_) {}
+                                break;
+                            }
+                        }
+                        textEl.style.setProperty('max-height', 'none', 'important');
+                        textEl.style.setProperty('overflow', 'visible', 'important');
+                        textEl.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+                        textEl.style.setProperty('display', 'block', 'important');
+                        textEl.style.setProperty('white-space', 'normal', 'important');
+                        for (const node of allNodes) {
+                            const nodeText = (node.textContent || '').trim().toLowerCase();
+                            if (!nodeText || node.children.length > 0) continue;
+                            if (!expandTexts.includes(nodeText)) continue;
+                            try { node.click(); } catch (_) {}
+                            break;
+                        }
+                    }
                     const timeEl = article.querySelector('time');
                     const publishedAt = timeEl ? (timeEl.getAttribute('datetime') || '') : '';
                     const href = info.href.startsWith('http') ? info.href : `https://x.com${info.href}`;
+                    articles.push({ article, postId: info.postId, publishedAt, href });
+                } catch (error) {}
+            }
 
+            // Wait for React to re-render with original text
+            if (articles.length > 0) {
+                await new Promise(r => setTimeout(r, 500));
+            }
+
+            // Phase 2: read text and metrics
+            for (const { article, postId, publishedAt, href } of articles) {
+                try {
+                    const textEl = article.querySelector('[data-testid="tweetText"]');
+                    const text = textEl ? (textEl.innerText || textEl.textContent || '').trim() : '';
                     results.push({
-                        postId: info.postId,
+                        postId,
                         publishedAt,
                         content: text || nonTextContent(article),
                         url: href,
+                        views: firstMetric(article, [
+                            'a[href*="/analytics"]',
+                            'div[data-testid="postViewCount"]',
+                            '[aria-label*="Views"]',
+                            '[aria-label*="views"]',
+                            '[aria-label*="浏览"]',
+                            '[aria-label*="表示"]',
+                        ]) || '',
+                        likes: ariaMetric(article, ['like', 'unlike']) || '',
+                        retweets: ariaMetric(article, ['retweet', 'unretweet']) || '',
+                        replies: ariaMetric(article, ['reply']) || '',
                     });
                 } catch (error) {}
             }
@@ -204,14 +307,34 @@ def collect_profile_tweets(
     stop_event=None,
     writer=None,
     row_offset: int = 0,
+    page_timeout=None,
+    scroll_delay=None,
+    no_new_scroll_limit=None,
+    save_batch_size=None,
+    cooldown_min=None,
+    cooldown_max=None,
+    pause_event=None,
 ) -> list[dict[str, str]] | tuple[list[dict[str, str]], int, int]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if scroll_delay is None:
+        scroll_delay = SCROLL_DELAY
+    if no_new_scroll_limit is None:
+        no_new_scroll_limit = NO_NEW_SCROLL_LIMIT
+    if save_batch_size is None:
+        save_batch_size = SAVE_BATCH_SIZE
+    if cooldown_min is None:
+        cooldown_min = COOLDOWN_MIN_SECONDS
+    if cooldown_max is None:
+        cooldown_max = COOLDOWN_MAX_SECONDS
+
     username = extract_profile_username(profile_url)
     if not username:
         raise ValueError(f"无效的 X 博主主页链接：{profile_url}")
 
-    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-    page.wait_for_selector('article[data-testid="tweet"], article', timeout=PAGE_LOAD_TIMEOUT)
-    time.sleep(INITIAL_LOAD_DELAY)
+    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_timeout)
+    page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
+    interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
 
     tweets: list[dict[str, str]] = []
     pending_rows: list[dict[str, str]] = []
@@ -223,6 +346,8 @@ def collect_profile_tweets(
 
     for scroll_index in range(max_scrolls):
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
 
         visible_tweets = extract_visible_profile_tweets(page, username)
@@ -245,6 +370,7 @@ def collect_profile_tweets(
                 except Exception:
                     continue
                     
+            normalized_tweet["profile_url"] = profile_url
             tweets.append(normalized_tweet)
             added += 1
             if writer:
@@ -256,8 +382,8 @@ def collect_profile_tweets(
                     try:
                         detail_page.goto(normalized_tweet["url"], wait_until="domcontentloaded", timeout=30000)
                         detail_page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
-                        time.sleep(2)
-                        comments = extract_comments(detail_page, normalized_tweet["url"], max_comments, log_callback, stop_event)
+                        interruptible_sleep(2, stop_event)
+                        comments = extract_comments(detail_page, normalized_tweet["url"], max_comments, log_callback, stop_event, pause_event=pause_event)
                         for comment in comments:
                             comment_row = {
                                 "序号": str(row_offset),
@@ -270,7 +396,7 @@ def collect_profile_tweets(
                     except Exception as exc:
                         log_line(log_callback, f"    提取评论失败：{exc}")
                 
-                if len(pending_rows) >= SAVE_BATCH_SIZE:
+                if len(pending_rows) >= save_batch_size:
                     if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
                         for r in pending_rows:
                             writer.writerow("推文信息", r)
@@ -279,7 +405,7 @@ def collect_profile_tweets(
                     writer.save()
                     written_count += len(pending_rows)
                     pending_rows.clear()
-                    cooldown_after_batch(written_count, log_callback, stop_event)
+                    cooldown_after_batch(written_count, log_callback, stop_event, pause_event=pause_event, save_batch_size=save_batch_size, cooldown_min=cooldown_min, cooldown_max=cooldown_max)
                     if should_stop(stop_event):
                         break
 
@@ -288,15 +414,15 @@ def collect_profile_tweets(
             no_new_count = 0
         else:
             no_new_count += 1
-            if no_new_count >= NO_NEW_SCROLL_LIMIT:
-                log_line(log_callback, f"  连续 {NO_NEW_SCROLL_LIMIT} 次没有新增帖子，停止。")
+            if no_new_count >= no_new_scroll_limit:
+                log_line(log_callback, f"  连续 {no_new_scroll_limit} 次没有新增帖子，停止。")
                 break
 
         if should_stop(stop_event):
             break
 
         page.evaluate(f"window.scrollBy(0, {SCROLL_PX})")
-        time.sleep(SLOW_SCROLL_DELAY if no_new_count else SCROLL_DELAY)
+        interruptible_sleep(scroll_delay + 1.0 if no_new_count else scroll_delay, stop_event)
 
     if writer and pending_rows:
         if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
@@ -332,7 +458,19 @@ def run_x_profile_tweets_spider(
     log_callback=None,
     finish_callback=None,
     stop_event=None,
+    config=None,
+    pause_event=None,
 ):
+    if config is None:
+        config = {}
+    page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    scroll_delay_val = float(config.get("scroll_delay", SCROLL_DELAY))
+    no_new_scroll_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
+    save_batch_size_val = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
+    cooldown_min_val = float(config.get("cooldown_min", COOLDOWN_MIN_SECONDS))
+    cooldown_max_val = float(config.get("cooldown_max", COOLDOWN_MAX_SECONDS))
+    max_scrolls = int(config.get("max_scrolls", max_scrolls))
+
     completed_path = None
     page = None
     try:
@@ -349,7 +487,7 @@ def run_x_profile_tweets_spider(
         get_comments_bool = get_comments_str == "是"
         start_dt, end_dt = None, None
         if limit_time_bool:
-            start_dt, end_dt = parse_date_range(start_date, end_date)
+            start_dt, end_dt = _parse_date_range(start_date, end_date)
 
         max_comments_val = max(10, int(max_comments))
         output_path = build_output_path("x", f"x_profile_tweets_{time.strftime('%Y%m%d')}.xlsx")
@@ -378,6 +516,8 @@ def run_x_profile_tweets_spider(
                 if should_stop(stop_event):
                     log_line(log_callback, "任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
 
                 username = extract_profile_username(profile_url)
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取主页：{profile_url}")
@@ -396,6 +536,13 @@ def run_x_profile_tweets_spider(
                         stop_event,
                         writer=writer,
                         row_offset=row_offset,
+                        page_timeout=page_load_timeout_val,
+                        scroll_delay=scroll_delay_val,
+                        no_new_scroll_limit=no_new_scroll_limit_val,
+                        save_batch_size=save_batch_size_val,
+                        cooldown_min=cooldown_min_val,
+                        cooldown_max=cooldown_max_val,
+                        pause_event=pause_event,
                     )
                     log_line(log_callback, f"  完成 @{username}：写入 {written_count} 条帖子。")
                 except PlaywrightTimeoutError:

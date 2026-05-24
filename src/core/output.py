@@ -14,7 +14,10 @@ PLATFORM_DIRS = {
 
 
 def get_workspace_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[2]
+    if not (root / "requirements.txt").exists() and not (root / "main.py").exists():
+        raise RuntimeError(f"Workspace root not found at {root}")
+    return root
 
 
 def get_output_root() -> Path:
@@ -24,6 +27,8 @@ def get_output_root() -> Path:
 
 
 def get_platform_output_dir(platform: str) -> Path:
+    if ".." in platform or "/" in platform or "\\" in platform:
+        raise ValueError(f"Invalid platform name: {platform}")
     folder_name = PLATFORM_DIRS.get(platform, platform)
     output_dir = get_output_root() / folder_name
     output_dir.mkdir(parents=True, exist_ok=True)

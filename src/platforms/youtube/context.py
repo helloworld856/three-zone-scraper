@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from src.core import XlsxRowWriter, build_output_path, sanitize_csv_rows, should_stop
+from src.core import XlsxRowWriter, build_output_path, sanitize_csv_rows, should_stop, wait_if_paused
 
 CONTEXT_SIZE = 5
 VIDEO_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/)([0-9A-Za-z_-]{11})")
@@ -22,7 +22,7 @@ def parse_video_id(url: str) -> str:
 
 def parse_input_pairs(txt_path: str) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
-    with open(txt_path, "r", encoding="utf-8") as f:
+    with open(txt_path, "r", encoding="utf-8-sig") as f:
         for line in f:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -110,25 +110,16 @@ def resolve_channel_from_video(youtube, video_id: str) -> dict:
     channel_items = channel_res.get("items", [])
     return channel_items[0] if channel_items else {}
 
-def search_channel(youtube, query: str) -> dict:
-    res = youtube.search().list(
-        part="snippet",
-        q=query,
-        type="channel",
-        maxResults=1,
-    ).execute()
-    items = res.get("items", [])
-    if not items:
-        return {"items": []}
-    channel_id = items[0]["snippet"]["channelId"]
-    return youtube.channels().list(part="snippet,contentDetails", id=channel_id).execute()
-
-def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: str, stop_event=None) -> tuple[list[str], int, list[str]]:
+def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: str, stop_event=None, pause_event=None, max_pages: int = 200, context_size: int = CONTEXT_SIZE) -> tuple[list[str], int, list[str]]:
     video_ids: list[str] = []
     next_page_token = None
+    page_count = 0
 
-    while True:
+    while page_count < max_pages:
+        page_count += 1
         if should_stop(stop_event):
+            return [], -1, video_ids
+        if wait_if_paused(pause_event, stop_event):
             return [], -1, video_ids
         res = youtube.playlistItems().list(
             part="contentDetails",
@@ -144,7 +135,7 @@ def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: s
 
         if target_video_id in video_ids:
             target_index = video_ids.index(target_video_id)
-            if len(video_ids) >= target_index + CONTEXT_SIZE + 1:
+            if len(video_ids) >= target_index + context_size + 1:
                 break
 
         next_page_token = res.get("nextPageToken")
@@ -155,14 +146,16 @@ def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: s
         return [], -1, video_ids
 
     target_index = video_ids.index(target_video_id)
-    selected_indices = list(range(max(0, target_index - CONTEXT_SIZE), target_index))
-    selected_indices += list(range(target_index + 1, min(len(video_ids), target_index + CONTEXT_SIZE + 1)))
+    selected_indices = list(range(max(0, target_index - context_size), target_index))
+    selected_indices += list(range(target_index + 1, min(len(video_ids), target_index + context_size + 1)))
     return [video_ids[idx] for idx in selected_indices], target_index, video_ids
 
-def fetch_video_details(youtube, video_ids: list[str], stop_event=None) -> dict[str, dict]:
+def fetch_video_details(youtube, video_ids: list[str], stop_event=None, pause_event=None) -> dict[str, dict]:
     details: dict[str, dict] = {}
     for start in range(0, len(video_ids), 50):
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         chunk = video_ids[start:start + 50]
         if not chunk:
@@ -180,7 +173,6 @@ def fetch_video_details(youtube, video_ids: list[str], stop_event=None) -> dict[
                 "published_at": snippet.get("publishedAt", ""),
                 "view_count": stats.get("viewCount", ""),
                 "like_count": stats.get("likeCount", ""),
-                "favorite_count": stats.get("favoriteCount", ""),
                 "comment_count": stats.get("commentCount", ""),
             }
     return details
@@ -194,13 +186,12 @@ OUTPUT_FIELDS = [
     "发布时间",
     "播放量",
     "点赞数",
-    "收藏数",
     "评论数",
     "视频ID",
 ]
 
 
-def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_cache: dict[str, dict], log_callback, stop_event=None) -> list[dict]:
+def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_cache: dict[str, dict], log_callback, stop_event=None, pause_event=None, context_size: int = CONTEXT_SIZE, max_upload_pages: int = 200) -> list[dict]:
     rows: list[dict] = []
     target_video_id = parse_video_id(target_video_url)
     if not target_video_id:
@@ -223,14 +214,14 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
             log_callback("  跳过：无法解析上传列表。请检查博主主页链接是否为 YouTube 频道主页。")
             return rows
 
-    selected_ids, target_index, timeline_ids = find_context_video_ids(youtube, uploads_id, target_video_id, stop_event)
+    selected_ids, target_index, timeline_ids = find_context_video_ids(youtube, uploads_id, target_video_id, stop_event, pause_event, max_upload_pages, context_size)
     if should_stop(stop_event):
         return rows
     if target_index < 0:
         log_callback("  跳过：目标视频不在该博主公开上传列表中。")
         return rows
 
-    details = fetch_video_details(youtube, selected_ids, stop_event)
+    details = fetch_video_details(youtube, selected_ids, stop_event, pause_event)
     for vid in selected_ids:
         current_index = timeline_ids.index(vid)
         item = details.get(vid, {})
@@ -243,42 +234,23 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
             "发布时间": item.get("published_at", ""),
             "播放量": item.get("view_count", ""),
             "点赞数": item.get("like_count", ""),
-            "收藏数": item.get("favorite_count", ""),
             "评论数": item.get("comment_count", ""),
             "视频ID": vid,
         })
     return rows
 
 
-def build_rows(api_key: str, pairs: list[tuple[str, str]], log_callback, stop_event=None) -> list[dict]:
-    youtube = build("youtube", "v3", developerKey=api_key)
-    rows: list[dict] = []
-    channel_cache: dict[str, dict] = {}
+def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+    if config is None:
+        config = {}
+    context_size = int(config.get("context_size", CONTEXT_SIZE))
+    max_upload_pages = int(config.get("max_upload_pages", 200))
 
-    for index, (target_video_url, profile_url) in enumerate(pairs, 1):
-        if should_stop(stop_event):
-            log_callback("任务已停止。")
-            break
-        log_callback(f"[{index}/{len(pairs)}] 定位 YouTube 目标视频: {target_video_url}")
-
-        try:
-            pair_rows = build_pair_rows(youtube, target_video_url, profile_url, channel_cache, log_callback, stop_event)
-            rows.extend(pair_rows)
-            log_callback(f"  完成：提取到 {len(pair_rows)} 条前后视频。")
-        except HttpError as e:
-            log_callback(f"  YouTube API 错误：{e}")
-        except Exception as e:
-            log_callback(f"  处理失败：{e}")
-
-    return rows
-
-
-def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback, finish_callback, stop_event=None):
     output_path = None
     try:
         pairs = parse_input_pairs(txt_path)
         if not pairs:
-            log_callback("TXT 中没有有效的‘视频链接 + 博主主页链接’行。")
+            log_callback("TXT 中没有有效的'视频链接 + 博主主页链接'行。")
             return
         if should_stop(stop_event):
             log_callback("任务已停止。")
@@ -292,9 +264,11 @@ def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback,
             if should_stop(stop_event):
                 log_callback("任务已停止。")
                 break
+            if wait_if_paused(pause_event, stop_event):
+                break
             log_callback(f"[{index}/{len(pairs)}] 定位 YouTube 目标视频: {target_video_url}")
             try:
-                rows = build_pair_rows(youtube, target_video_url, profile_url, channel_cache, log_callback, stop_event)
+                rows = build_pair_rows(youtube, target_video_url, profile_url, channel_cache, log_callback, stop_event, pause_event, context_size, max_upload_pages)
                 if rows:
                     writer.writerows(sanitize_csv_rows(rows))
                     written_count += len(rows)

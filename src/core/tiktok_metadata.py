@@ -1,5 +1,7 @@
+import logging
 import time
 
+logger = logging.getLogger(__name__)
 
 TITLE_SELECTORS = [
     "[data-e2e='browse-video-desc']",
@@ -41,6 +43,7 @@ def _extract_text_from_scope(scope, selector):
             return clean_tiktok_title(node.get_attribute("content"))
         return clean_tiktok_title(node.inner_text())
     except Exception:
+        logger.debug("Selector '%s' failed", selector, exc_info=True)
         return ""
 
 
@@ -74,15 +77,6 @@ def resolve_tiktok_card_container(element):
         container = handle.as_element()
         return container or element
     except Exception:
+        logger.debug("resolve_tiktok_card_container failed", exc_info=True)
         return element
 
-
-def extract_tiktok_title_from_card(element):
-    container = resolve_tiktok_card_container(element)
-
-    for selector in TITLE_SELECTORS:
-        title = _extract_text_from_scope(container, selector)
-        if title:
-            return title
-
-    return "未知"

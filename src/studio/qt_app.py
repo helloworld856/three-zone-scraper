@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 
 
 ALL_CATEGORY = "全部"
-CATEGORY_ORDER = [ALL_CATEGORY, "YouTube", "TikTok", "X/Twitter", "Instagram", "Facebook", "数据处理"]
+CATEGORY_ORDER = [ALL_CATEGORY, "YouTube", "TikTok", "X/Twitter", "Instagram", "数据处理"]
 
 
 class ThreePlatformCrawlerQtApp(QMainWindow):
@@ -355,14 +355,6 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         process.readyReadStandardOutput.connect(lambda tool_id=tool.tool_id: self._read_tool_output(tool_id))
         self.processes[tool.tool_id] = process
         process.start()
-
-        if not process.waitForStarted(3000):
-            self.processes.pop(tool.tool_id, None)
-            logger.error("Failed to launch tool process: %s (%s)", tool.name, tool.tool_id)
-            QMessageBox.critical(self, "启动失败", f"{tool.name} 未能启动。")
-            return
-
-        logger.info("Tool process started: %s (%s)", tool.name, tool.tool_id)
         self.refresh_tools()
 
     def _read_tool_output(self, tool_id: str) -> None:
@@ -375,13 +367,15 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
     def _tool_finished(self, tool_id: str, exit_code: int, exit_status) -> None:
         logger.info("Tool process finished: %s exit_code=%s exit_status=%s", tool_id, exit_code, exit_status)
-        self.processes.pop(tool_id, None)
-        self.refresh_tools()
+        if tool_id in self.processes:
+            self.processes.pop(tool_id, None)
+            self.refresh_tools()
 
     def _tool_error(self, tool_id: str, error) -> None:
         logger.error("Tool process error: %s error=%s", tool_id, error)
-        self.processes.pop(tool_id, None)
-        self.refresh_tools()
+        if tool_id in self.processes:
+            self.processes.pop(tool_id, None)
+            self.refresh_tools()
 
     def _is_tool_running(self, tool_id: str) -> bool:
         process = self.processes.get(tool_id)
@@ -400,7 +394,10 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         for process in list(self.processes.values()):
             if process.state() != QProcess.NotRunning:
                 process.terminate()
-                if not process.waitForFinished(1500):
+        for process in list(self.processes.values()):
+            if process.state() != QProcess.NotRunning:
+                process.waitForFinished(1500)
+                if process.state() != QProcess.NotRunning:
                     process.kill()
         event.accept()
 
@@ -412,7 +409,7 @@ def main() -> None:
     app.setApplicationName("多平台数据爬取工具")
     window = ThreePlatformCrawlerQtApp()
     window.show()
-    raise SystemExit(app.exec_())
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":

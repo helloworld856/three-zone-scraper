@@ -1,7 +1,6 @@
 [tool.ruff]
 line-length = 150
 exclude = [
-    "src/pytok",
     ".venv",
 ]
 

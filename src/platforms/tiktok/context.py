@@ -18,6 +18,7 @@ from src.core import (
     resolve_tiktok_card_container,
     sanitize_csv_rows,
     should_stop,
+    wait_if_paused,
 )
 
 CONTEXT_SIZE = 5
@@ -327,7 +328,7 @@ def resolve_target_video_context(page, target_video_url: str) -> tuple[str, str,
 
     return final_video_url, final_video_id, profile_url
 
-def build_author_items_api_url(sec_uid: str, cursor: str) -> str:
+def build_author_items_api_url(sec_uid: str, cursor: str, api_page_size: int = API_PAGE_SIZE) -> str:
     params = {
         "WebIdLastTime": str(int(time.time())),
         "aid": "1988",
@@ -339,7 +340,7 @@ def build_author_items_api_url(sec_uid: str, cursor: str) -> str:
         "browser_platform": "Win32",
         "channel": "tiktok_web",
         "cookie_enabled": "true",
-        "count": str(API_PAGE_SIZE),
+        "count": str(api_page_size),
         "cursor": str(cursor or "0"),
         "device_platform": "web_pc",
         "focus_state": "true",
@@ -429,14 +430,14 @@ def item_metrics(item: dict) -> dict[str, str]:
         "评论数": stat("commentCount", "comment_count", "comments"),
     }
 
-def collect_author_items_via_api(page, sec_uid: str, target_video_id: str, log_callback) -> tuple[list[dict], int]:
+def collect_author_items_via_api(page, sec_uid: str, target_video_id: str, log_callback, context_size: int = CONTEXT_SIZE, api_page_size: int = API_PAGE_SIZE, max_api_pages: int = MAX_API_PAGES) -> tuple[list[dict], int]:
     items: list[dict] = []
     seen_ids: set[str] = set()
     cursor = "0"
     target_index = -1
 
-    for page_index in range(MAX_API_PAGES):
-        data = fetch_json_via_page(page, build_author_items_api_url(sec_uid, cursor))
+    for page_index in range(max_api_pages):
+        data = fetch_json_via_page(page, build_author_items_api_url(sec_uid, cursor, api_page_size=api_page_size))
         item_list = data.get("itemList") or data.get("items") or []
         if not isinstance(item_list, list) or not item_list:
             break
@@ -457,7 +458,7 @@ def collect_author_items_via_api(page, sec_uid: str, target_video_id: str, log_c
                 break
 
         log_callback(f"  API 已收集 {len(items)} 条投稿记录。")
-        if target_index >= 0 and len(items) >= target_index + CONTEXT_SIZE + 1:
+        if target_index >= 0 and len(items) >= target_index + context_size + 1:
             break
         if len(items) == before_count or not data.get("hasMore"):
             break
@@ -469,9 +470,9 @@ def collect_author_items_via_api(page, sec_uid: str, target_video_id: str, log_c
 
     return items, target_index
 
-def rows_from_api_items(items: list[dict], target_index: int, profile_url: str, target_video_url: str) -> list[dict[str, str]]:
-    selected_indices = list(range(max(0, target_index - CONTEXT_SIZE), target_index))
-    selected_indices += list(range(target_index + 1, min(len(items), target_index + CONTEXT_SIZE + 1)))
+def rows_from_api_items(items: list[dict], target_index: int, profile_url: str, target_video_url: str, context_size: int = CONTEXT_SIZE) -> list[dict[str, str]]:
+    selected_indices = list(range(max(0, target_index - context_size), target_index))
+    selected_indices += list(range(target_index + 1, min(len(items), target_index + context_size + 1)))
 
     rows: list[dict[str, str]] = []
     for current_index in selected_indices:
@@ -520,7 +521,7 @@ def collect_visible_profile_video_links(page) -> list[str]:
             seen.add(cleaned)
     return links
 
-def collect_profile_video_links(page, profile_url: str, target_video_id: str, log_callback, stop_event=None) -> tuple[list[str], int]:
+def collect_profile_video_links(page, profile_url: str, target_video_id: str, log_callback, stop_event=None, pause_event=None, context_size: int = CONTEXT_SIZE, max_profile_scrolls: int = MAX_PROFILE_SCROLLS, profile_scroll_pause: float = PROFILE_SCROLL_PAUSE) -> tuple[list[str], int]:
     try:
         page.goto(profile_url, wait_until="domcontentloaded", timeout=60000)
     except Exception as exc:
@@ -555,8 +556,10 @@ def collect_profile_video_links(page, profile_url: str, target_video_id: str, lo
     target_index = -1
     no_growth_count = 0
 
-    for scroll_index in range(MAX_PROFILE_SCROLLS):
+    for scroll_index in range(max_profile_scrolls):
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         previous_links = all_links
         current_links = collect_visible_profile_video_links(page)
@@ -572,7 +575,7 @@ def collect_profile_video_links(page, profile_url: str, target_video_id: str, lo
                 break
         target_index = current_target_index
 
-        if target_index >= 0 and len(all_links) > target_index + CONTEXT_SIZE:
+        if target_index >= 0 and len(all_links) > target_index + context_size:
             log_callback(f"  主页网格命中目标视频，已加载 {len(all_links)} 个视频链接。")
             break
 
@@ -581,7 +584,7 @@ def collect_profile_video_links(page, profile_url: str, target_video_id: str, lo
             page.evaluate("window.scrollBy(0, Math.floor(window.innerHeight * 1.5))")
         except Exception:
             pass
-        time.sleep(PROFILE_SCROLL_PAUSE if target_index < 0 else 0.45)
+        time.sleep(profile_scroll_pause if target_index < 0 else 0.45)
 
         if len(all_links) == previous_count or all_links == previous_links:
             no_growth_count += 1
@@ -680,17 +683,19 @@ def extract_video_metrics(page, video_url: str) -> dict:
             metrics[key] = value
     return metrics
 
-def fallback_rows_from_profile(profile_page, detail_page, profile_candidates: list[str], target_video_id: str, target_video_url: str, log_callback, stop_event=None) -> list[dict[str, str]]:
+def fallback_rows_from_profile(profile_page, detail_page, profile_candidates: list[str], target_video_id: str, target_video_url: str, log_callback, stop_event=None, pause_event=None, context_size: int = CONTEXT_SIZE, max_profile_scrolls: int = MAX_PROFILE_SCROLLS, profile_scroll_pause: float = PROFILE_SCROLL_PAUSE) -> list[dict[str, str]]:
     links, target_index = [], -1
     matched_profile_url = profile_candidates[0] if profile_candidates else ""
 
     for candidate_profile_url in profile_candidates:
         if should_stop(stop_event):
             return []
+        if wait_if_paused(pause_event, stop_event):
+            return []
         if not candidate_profile_url:
             continue
         log_callback(f"  兜底：尝试主页定位：{candidate_profile_url}")
-        links, target_index = collect_profile_video_links(profile_page, candidate_profile_url, target_video_id, log_callback, stop_event)
+        links, target_index = collect_profile_video_links(profile_page, candidate_profile_url, target_video_id, log_callback, stop_event, pause_event, context_size, max_profile_scrolls, profile_scroll_pause)
         log_callback(f"  该主页已捕获 {len(links)} 个视频链接。")
         if target_index >= 0:
             matched_profile_url = candidate_profile_url
@@ -701,14 +706,16 @@ def fallback_rows_from_profile(profile_page, detail_page, profile_candidates: li
             log_callback("  主页未命中目标视频，不再用底部视频冒充上下文。")
         return []
 
-    selected_indices = list(range(max(0, target_index - CONTEXT_SIZE), target_index))
-    selected_indices += list(range(target_index + 1, min(len(links), target_index + CONTEXT_SIZE + 1)))
+    selected_indices = list(range(max(0, target_index - context_size), target_index))
+    selected_indices += list(range(target_index + 1, min(len(links), target_index + context_size + 1)))
     selected_links = [links[current_index] for current_index in selected_indices]
     play_counts = extract_selected_play_counts(profile_page, selected_links)
 
     rows: list[dict[str, str]] = []
     for current_index in selected_indices:
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         video_url = links[current_index]
         log_callback(f"  提取 {relation_for_index(target_index, current_index)}：{video_url}")
@@ -726,7 +733,15 @@ def fallback_rows_from_profile(profile_page, detail_page, profile_candidates: li
 def write_rows(writer: XlsxRowWriter, rows: list[dict[str, str]]):
     writer.writerows(sanitize_csv_rows(rows))
 
-def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None):
+def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
+    if config is None:
+        config = {}
+    context_size = int(config.get("context_size", CONTEXT_SIZE))
+    api_page_size = int(config.get("api_page_size", API_PAGE_SIZE))
+    max_api_pages = int(config.get("max_api_pages", MAX_API_PAGES))
+    max_profile_scrolls = int(config.get("max_profile_scrolls", MAX_PROFILE_SCROLLS))
+    profile_scroll_pause = float(config.get("profile_scroll_pause", PROFILE_SCROLL_PAUSE))
+
     output_path = None
     completed_path = None
     try:
@@ -754,6 +769,8 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
                 log_callback(f"[{index}/{len(pairs)}] 定位 TikTok 目标视频：{target_video_url}")
                 try:
                     resolved_video_url, target_video_id, resolved_profile_url = resolve_target_video_context(target_page, target_video_url)
@@ -779,9 +796,9 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                     if sec_uid:
                         try:
                             log_callback("  使用 API 快速定位投稿列表。")
-                            items, target_index = collect_author_items_via_api(target_page, sec_uid, target_video_id, log_callback)
+                            items, target_index = collect_author_items_via_api(target_page, sec_uid, target_video_id, log_callback, context_size, api_page_size, max_api_pages)
                             if target_index >= 0:
-                                rows = rows_from_api_items(items, target_index, matched_profile_url, resolved_video_url)
+                                rows = rows_from_api_items(items, target_index, matched_profile_url, resolved_video_url, context_size)
                                 log_callback(f"  API 命中目标视频，准备写入 {len(rows)} 条。")
                             else:
                                 log_callback("  API 未命中目标视频，切换到主页兜底。")
@@ -791,7 +808,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                         log_callback("  未从目标视频页解析到 secUid，切换到主页兜底。")
 
                     if not rows:
-                        rows = fallback_rows_from_profile(profile_page, detail_page, profile_candidates, target_video_id, resolved_video_url, log_callback, stop_event)
+                        rows = fallback_rows_from_profile(profile_page, detail_page, profile_candidates, target_video_id, resolved_video_url, log_callback, stop_event, pause_event, context_size, max_profile_scrolls, profile_scroll_pause)
 
                     if not rows:
                         log_callback("  跳过：API 和主页兜底都没有定位到目标视频。")

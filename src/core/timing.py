@@ -22,3 +22,11 @@ def random_cooldown(log_callback=None, stop_event=None, min_seconds: float = 3.0
     if log_callback:
         log_callback(f"  随机等待 {seconds:.1f} 秒，{reason}。")
     return interruptible_sleep(seconds, stop_event)
+
+
+def wait_if_paused(pause_event=None, stop_event=None) -> bool:
+    while pause_event and pause_event.is_set():
+        if should_stop(stop_event):
+            return True
+        time.sleep(0.1)
+    return should_stop(stop_event)

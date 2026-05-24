@@ -18,12 +18,15 @@ from src.core import (
     XlsxRowWriter,
     build_output_path,
     connect_existing_chromium,
+    expand_compact_number,
+    interruptible_sleep,
     sanitize_csv_cell,
     should_stop,
+    wait_if_paused,
 )
 
 
-CSV_FIELDS = ["序号", "作品ID", "作品链接", "发布时间", "作品内容", "浏览量", "评论数", "点赞数"]
+CSV_FIELDS = ["序号", "作品ID", "作品链接", "发布时间", "作品内容", "评论数", "点赞数"]
 PAGE_LOAD_TIMEOUT = 45000
 INITIAL_LOAD_DELAY = 3.5
 SCROLL_DELAY = 3.0
@@ -75,13 +78,9 @@ def interruptible_random_sleep(min_seconds: float, max_seconds: float, log_callb
     max_seconds = max(min_seconds, float(max_seconds or min_seconds))
     seconds = random.uniform(min_seconds, max_seconds)
     if seconds <= 0:
-        return
+        return False
     log_line(log_callback, f"    {reason}，随机等待 {seconds:.1f} 秒。")
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if should_stop(stop_event):
-            break
-        time.sleep(min(0.5, deadline - time.time()))
+    return interruptible_sleep(seconds, stop_event)
 
 
 def clean_profile_url(url: str) -> str:
@@ -148,12 +147,12 @@ def extract_work_id(work_url: str) -> str:
     return match.group(1) if match else ""
 
 
-def normalize_metric_text(text: str) -> str:
+def normalize_metric_text(text: str, default: str = "") -> str:
     value = re.sub(r"\s+", " ", text or "").strip()
     if not value:
-        return ""
+        return default
     match = re.search(r"(\d[\d,.]*(?:\.\d+)?\s*(?:K|M|B|万|萬|亿|億)?)", value, flags=re.I)
-    return match.group(1).strip() if match else ""
+    return expand_compact_number(match.group(1).strip(), default=default) if match else default
 
 
 def format_instagram_time(raw_time: str) -> str:
@@ -181,7 +180,14 @@ def build_content(caption: str, media_type: str) -> str:
     if looks_like_instagram_auto_alt(text):
         text = ""
     title = text.splitlines()[0].strip() if text else ""
-    return f"{title}[视频]" if title else "[视频]"
+    mt = (media_type or "").lower()
+    if mt in ("reel", "video"):
+        label = "[视频]"
+    elif mt == "carousel":
+        label = "[轮播]"
+    else:
+        label = "[图片]"
+    return f"{title}{label}" if title else label
 
 
 def extract_visible_work_links(page) -> list[dict[str, str]]:
@@ -299,13 +305,22 @@ def is_instagram_unavailable_page(page) -> bool:
     )
 
 
-def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrolls: int, log_callback, stop_event=None) -> list[dict[str, str]]:
+def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrolls: int, log_callback, stop_event=None, pause_event=None, page_timeout=None, scroll_delay=None, scroll_px=None, no_new_limit=None) -> list[dict[str, str]]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if scroll_delay is None:
+        scroll_delay = SCROLL_DELAY
+    if scroll_px is None:
+        scroll_px = SCROLL_PX
+    if no_new_limit is None:
+        no_new_limit = NO_NEW_SCROLL_LIMIT
+
     username = extract_username(profile_url)
     if not username:
         raise ValueError(f"无效的 Instagram 作者主页链接：{profile_url}")
 
-    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-    time.sleep(INITIAL_LOAD_DELAY)
+    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_timeout)
+    interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
     try:
         page.wait_for_selector('main, article, a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]', timeout=12000)
     except PlaywrightTimeoutError:
@@ -321,7 +336,8 @@ def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrol
     for scroll_index in range(max_scrolls):
         if should_stop(stop_event) or len(works) >= max_works:
             break
-
+        if wait_if_paused(pause_event, stop_event):
+            break
         added = 0
         for item in extract_visible_work_links(page):
             link = normalize_work_url(item.get("link", ""))
@@ -346,12 +362,12 @@ def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrol
                     f"  第一次扫描未发现作品链接：url={info.get('url')} title={info.get('title')} "
                     f"links={info.get('linkCount')} postLinks={info.get('postLinkCount')}",
                 )
-            if no_new_count >= NO_NEW_SCROLL_LIMIT:
-                log_line(log_callback, f"  连续 {NO_NEW_SCROLL_LIMIT} 次没有新增作品，停止滚动。")
+            if no_new_count >= no_new_limit:
+                log_line(log_callback, f"  连续 {no_new_limit} 次没有新增作品，停止滚动。")
                 break
 
-        page.evaluate(f"window.scrollBy(0, {SCROLL_PX})")
-        time.sleep(SCROLL_DELAY)
+        page.evaluate(f"window.scrollBy(0, {scroll_px})")
+        interruptible_sleep(scroll_delay, stop_event)
 
     return works
 
@@ -409,10 +425,20 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
             };
             const parseJsonScripts = () => {
                 const roots = [];
-                for (const script of document.querySelectorAll('script[type="application/json"]')) {
+                // Search ALL script tags for data containing the shortcode
+                for (const script of document.querySelectorAll('script')) {
                     const raw = script.textContent || '';
-                    if (!raw || (shortcode && !raw.includes(shortcode))) continue;
+                    if (!raw || raw.length > 800000) continue;
+                    if (shortcode && !raw.includes(shortcode)) continue;
                     try { roots.push(JSON.parse(raw)); } catch (error) {}
+                }
+                // Fallback: parse application/json and ld+json scripts without shortcode filter
+                if (!roots.length) {
+                    for (const script of document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]')) {
+                        const raw = script.textContent || '';
+                        if (!raw) continue;
+                        try { roots.push(JSON.parse(raw)); } catch (error) {}
+                    }
                 }
                 return roots;
             };
@@ -500,8 +526,8 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 if (structured) return structured;
                 const patterns = [];
                 for (const name of names) {
-                    patterns.push(new RegExp(`"${name}"\\\\s*:\\\\s*([0-9]+)`, 'i'));
-                    patterns.push(new RegExp(`"${name}"\\\\s*:\\\\s*\\\\{\\\\s*"count"\\\\s*:\\\\s*([0-9]+)`, 'i'));
+                    patterns.push(new RegExp(`"${name}"\\\\s*:\\\\s*"?([0-9][0-9,.]*[KMBkmb]?)"?`, 'i'));
+                    patterns.push(new RegExp(`"${name}"\\\\s*:\\\\s*\\\\{\\\\s*"count"\\\\s*:\\\\s*"?([0-9][0-9,.]*[KMBkmb]?)"?`, 'i'));
                 }
                 return firstMatch(patterns);
             };
@@ -517,6 +543,15 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 /^Photo by .+ on [A-Z][a-z]+ \\d{1,2}, \\d{4}\\.?(\\s+May be .*)?$/i.test(value || '') ||
                 /^Photo shared by .+ on [A-Z][a-z]+ \\d{1,2}, \\d{4}\\.?(\\s+May be .*)?$/i.test(value || '')
             );
+            // Expand truncated caption by clicking "... more"
+            const moreTexts = ['more', '...more', '…more', '更多', 'さらに表示', '더 보기'];
+            for (const el of document.querySelectorAll('article span, article div[role="button"]')) {
+                const t = (el.textContent || '').trim().toLowerCase();
+                if (moreTexts.some(mt => t === mt || t.endsWith(mt))) {
+                    try { el.click(); } catch (_) {}
+                    break;
+                }
+            }
             const lines = Array.from(document.querySelectorAll('article h1, article h2, article span, article div[dir="auto"]'))
                 .map(node => text(node))
                 .filter(Boolean);
@@ -539,7 +574,8 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                         node.getAttribute('title') || '',
                     ]),
                 ].map(line => line.trim()).filter(Boolean);
-                return bodyLines.find(line => patterns.some(pattern => pattern.test(line))) || '';
+                const matches = bodyLines.filter(line => patterns.some(pattern => pattern.test(line)));
+                return matches.find(line => /\\d/.test(line)) || matches[0] || '';
             };
             let mediaType = fallbackMediaType || '';
             const article = document.querySelector('article') || document;
@@ -552,10 +588,6 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 meta('article:published_time') ||
                 parseEpoch(valueFromStructured(['taken_at_timestamp', 'taken_at', 'date', 'created_time', 'created_at'])) ||
                 parseEpoch(firstMatch([/"taken_at_timestamp"\\s*:\\s*([0-9]+)/, /"taken_at"\\s*:\\s*([0-9]+)/, /"date"\\s*:\\s*([0-9]{10})/, /"created_time"\\s*:\\s*([0-9]{10})/]))
-            );
-            const views = (
-                metricFromJson(['play_count', 'view_count', 'views', 'video_view_count', 'video_play_count', 'ig_play_count', 'clips_play_count', 'fb_play_count']) ||
-                lineWith([/views?/i, /播放/, /观看/, /次观看/, /再生/])
             );
             const comments = (
                 metricFromJson(['comment_count', 'comments_count', 'edge_media_to_comment', 'edge_media_preview_comment', 'edge_media_to_parent_comment']) ||
@@ -570,7 +602,6 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 caption,
                 mediaType,
                 publishedAt,
-                views,
                 comments,
                 likes,
             };
@@ -579,13 +610,19 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
     )
 
 
-def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None) -> dict[str, str]:
+def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None, page_timeout=None) -> dict[str, str]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
     last_rate_limit = False
     for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
         if should_stop(stop_event):
             raise InstagramStoppedError("任务已停止")
-        response = page.goto(work["link"], wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-        time.sleep(INITIAL_LOAD_DELAY)
+        response = page.goto(work["link"], wait_until="domcontentloaded", timeout=page_timeout)
+        try:
+            page.wait_for_selector('article, section', timeout=8000)
+        except Exception:
+            pass
+        interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
         if should_stop(stop_event):
             raise InstagramStoppedError("任务已停止")
         if not is_instagram_rate_limited_page(page, response):
@@ -612,8 +649,7 @@ def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None
         "id": work.get("id", ""),
         "link": work.get("link", ""),
         "published_at": format_instagram_time(detail.get("publishedAt", "")),
-        "content": build_content(detail.get("caption", ""), "video"),
-        "views": normalize_metric_text(detail.get("views", "")),
+        "content": build_content(detail.get("caption", ""), detail.get("mediaType", "")),
         "comments": normalize_metric_text(detail.get("comments", "")),
         "likes": normalize_metric_text(detail.get("likes", "")),
     }
@@ -626,25 +662,9 @@ def row_from_work(index: int, work: dict[str, str]) -> dict[str, str]:
         "作品链接": sanitize_csv_cell(work.get("link", "")),
         "发布时间": sanitize_csv_cell(work.get("published_at", "")),
         "作品内容": sanitize_csv_cell(work.get("content", "")),
-        "浏览量": sanitize_csv_cell(work.get("views", "")),
         "评论数": sanitize_csv_cell(work.get("comments", "")),
         "点赞数": sanitize_csv_cell(work.get("likes", "")),
     }
-
-
-def cooldown_if_needed(index: int, every: int, min_seconds: float, max_seconds: float, log_callback, stop_event=None):
-    every = int(every or 0)
-    if every <= 0 or index <= 0 or index % every != 0:
-        return
-    min_seconds = max(0.0, float(min_seconds or 0))
-    max_seconds = max(min_seconds, float(max_seconds or min_seconds))
-    seconds = random.uniform(min_seconds, max_seconds)
-    log_line(log_callback, f"  已采集 {index} 条作品，随机等待 {seconds:.1f} 秒。")
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if should_stop(stop_event):
-            break
-        time.sleep(min(0.5, deadline - time.time()))
 
 
 def run_instagram_profile_works_spider(
@@ -655,7 +675,22 @@ def run_instagram_profile_works_spider(
     log_callback=None,
     finish_callback=None,
     stop_event=None,
+    config=None,
+    pause_event=None,
 ):
+    if config is None:
+        config = {}
+    page_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    scroll_delay_val = float(config.get("scroll_delay", SCROLL_DELAY))
+    scroll_px_val = int(config.get("scroll_px", SCROLL_PX))
+    no_new_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
+    save_batch_val = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
+    cooldown_min_val = float(config.get("cooldown_min", COOLDOWN_MIN_SECONDS))
+    cooldown_max_val = float(config.get("cooldown_max", COOLDOWN_MAX_SECONDS))
+    detail_delay_min_val = float(config.get("detail_delay_min", DETAIL_DELAY_MIN_SECONDS))
+    detail_delay_max_val = float(config.get("detail_delay_max", DETAIL_DELAY_MAX_SECONDS))
+    max_scrolls = int(config.get("max_scrolls", max_scrolls))
+
     completed_path = None
     page = None
     try:
@@ -687,13 +722,15 @@ def run_instagram_profile_works_spider(
                 if should_stop(stop_event):
                     log_line(log_callback, "任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
 
                 username = extract_username(profile_url)
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取作者主页：{profile_url}")
-                pending_rows = []
                 written_count = 0
+                batch_written = 0
                 try:
-                    links = collect_profile_work_links(page, profile_url, max_works, max_scrolls, log_callback, stop_event)
+                    links = collect_profile_work_links(page, profile_url, max_works, max_scrolls, log_callback, stop_event, pause_event, page_timeout=page_timeout_val, scroll_delay=scroll_delay_val, scroll_px=scroll_px_val, no_new_limit=no_new_limit_val)
                     log_line(log_callback, f"  @{username} 共收集到 {len(links)} 条作品链接，开始读取详情。")
                     if links:
                         interruptible_random_sleep(
@@ -703,43 +740,33 @@ def run_instagram_profile_works_spider(
                             stop_event,
                             reason="主页链接收集完成，开始详情页前",
                         )
+                        if should_stop(stop_event):
+                            break
                     rate_limited = False
                     for item_index, work in enumerate(links, 1):
                         if should_stop(stop_event):
                             break
+                        if wait_if_paused(pause_event, stop_event):
+                            break
                         try:
-                            detail = enrich_work_detail(page, work, log_callback, stop_event)
-                            pending_rows.append(row_from_work(serial_number, detail))
+                            detail = enrich_work_detail(page, work, log_callback, stop_event, page_timeout=page_timeout_val)
+                            writer.writerow(row_from_work(serial_number, detail))
                             serial_number += 1
+                            written_count += 1
+                            batch_written += 1
                             log_line(log_callback, f"    [{item_index}/{len(links)}] 完成：{work['link']}")
-                            if len(pending_rows) >= SAVE_BATCH_SIZE:
-                                writer.writerows(pending_rows)
-                                writer.save()
-                                written_count += len(pending_rows)
-                                pending_rows.clear()
-                                log_line(log_callback, f"    已保存 {written_count} 条，准备随机等待。")
-                                cooldown_if_needed(
-                                    item_index,
-                                    SAVE_BATCH_SIZE,
-                                    COOLDOWN_MIN_SECONDS,
-                                    COOLDOWN_MAX_SECONDS,
-                                    log_callback,
-                                    stop_event,
-                                )
-                            else:
-                                interruptible_random_sleep(
-                                    DETAIL_DELAY_MIN_SECONDS,
-                                    DETAIL_DELAY_MAX_SECONDS,
-                                    log_callback,
-                                    stop_event,
-                                    reason="详情页读取完成",
-                                )
+                            if item_index < len(links):
+                                seconds = random.uniform(detail_delay_min_val, detail_delay_max_val)
+                                log_line(log_callback, f"    详情页读取完成，随机等待 {seconds:.1f} 秒。")
+                                if interruptible_sleep(seconds, stop_event):
+                                    break
+                            if batch_written >= save_batch_val:
+                                seconds = random.uniform(cooldown_min_val, cooldown_max_val)
+                                log_line(log_callback, f"    已写入 {written_count} 条，随机等待 {seconds:.1f} 秒。")
+                                if interruptible_sleep(seconds, stop_event):
+                                    break
+                                batch_written = 0
                         except InstagramRateLimitError as exc:
-                            if pending_rows:
-                                writer.writerows(pending_rows)
-                                writer.save()
-                                written_count += len(pending_rows)
-                                pending_rows.clear()
                             log_line(log_callback, f"    停止当前作者详情读取：{exc}。已保存 {written_count} 条。")
                             rate_limited = True
                             break
@@ -753,11 +780,6 @@ def run_instagram_profile_works_spider(
                         except Exception as exc:
                             log_line(log_callback, f"    跳过：{work['link']}：{exc}")
 
-                    if pending_rows:
-                        writer.writerows(pending_rows)
-                        writer.save()
-                        written_count += len(pending_rows)
-                        pending_rows.clear()
                     if rate_limited and not should_stop(stop_event):
                         interruptible_random_sleep(
                             RATE_LIMIT_RETRY_DELAY_MIN_SECONDS,

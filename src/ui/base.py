@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,42 +47,49 @@ class WorkerSignals(QObject):
 
 
 class SimpleToolWindow(QWidget):
-    def __init__(self, title: str, fields: list[FieldSpec], *, width: int = 720, height: int = 560) -> None:
+    def __init__(self, title: str, fields: list[FieldSpec], *, width: int = 720, height: int = 680) -> None:
         super().__init__()
         self.setWindowTitle(title)
         self.resize(width, height)
         self.fields = fields
         self.widgets: dict[str, Any] = {}
         self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
         self.worker_thread: threading.Thread | None = None
         self.logger = get_logger(self.__class__.__name__)
-        self.signals = WorkerSignals()
+        self.signals = WorkerSignals(self)
         self.signals.log.connect(self.append_log)
         self.signals.finished.connect(self._finish_success)
         self.signals.failed.connect(self._finish_error)
+        self.form_layout: QFormLayout | None = None
+        self.config_values: dict[str, Any] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.setSpacing(10)
+        root.setContentsMargins(12, 10, 12, 8)
+        root.setSpacing(6)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
         form.setFormAlignment(Qt.AlignTop)
         form.setHorizontalSpacing(10)
-        form.setVerticalSpacing(8)
+        form.setVerticalSpacing(5)
         root.addLayout(form)
+        self.form_layout = form
 
         for field in self.fields:
             widget = self._create_field_widget(field)
             form.addRow(QLabel(field.label), widget)
 
         buttons = QHBoxLayout()
+        self.config_button = QPushButton("参数配置")
+        self.config_button.clicked.connect(self._open_config)
+        buttons.addWidget(self.config_button)
         buttons.addStretch(1)
-        self.start_button = QPushButton("开始")
-        self.start_button.clicked.connect(self.start)
-        buttons.addWidget(self.start_button)
+        self.action_button = QPushButton("开始")
+        self.action_button.clicked.connect(self._on_action_button)
+        buttons.addWidget(self.action_button)
         self.stop_button = QPushButton("停止")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop)
@@ -91,6 +99,7 @@ class SimpleToolWindow(QWidget):
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setPlaceholderText("运行日志")
+        self.log_text.document().setMaximumBlockCount(5000)
         root.addWidget(self.log_text, 1)
         self.setStyleSheet(
             """
@@ -128,7 +137,7 @@ class SimpleToolWindow(QWidget):
             widget = QPlainTextEdit()
             widget.setPlainText(str(field.default or ""))
             widget.setPlaceholderText(field.placeholder)
-            widget.setMinimumHeight(82)
+            widget.setMinimumHeight(64)
         elif field.kind == "int":
             widget = QSpinBox()
             widget.setRange(field.minimum, field.maximum)
@@ -150,6 +159,33 @@ class SimpleToolWindow(QWidget):
             layout.addWidget(button)
             widget = container
             widget.path_edit = edit
+        elif field.kind == "text_or_file":
+            widget = QWidget()
+            vbox = QVBoxLayout(widget)
+            vbox.setContentsMargins(0, 0, 0, 0)
+            vbox.setSpacing(4)
+            mode_combo = QComboBox()
+            mode_combo.addItems(["直接输入", "TXT 文件"])
+            vbox.addWidget(mode_combo)
+            text_edit = QPlainTextEdit()
+            text_edit.setPlaceholderText(field.placeholder or "每行一条")
+            text_edit.setMinimumHeight(48)
+            vbox.addWidget(text_edit)
+            file_row = QWidget()
+            fl = QHBoxLayout(file_row)
+            fl.setContentsMargins(0, 0, 0, 0)
+            file_edit = QLineEdit()
+            file_edit.setPlaceholderText("选择 TXT 文件...")
+            file_btn = QPushButton("选择")
+            file_btn.clicked.connect(lambda _=False, e=file_edit: self._select_text_file(e))
+            fl.addWidget(file_edit, 1)
+            fl.addWidget(file_btn)
+            vbox.addWidget(file_row)
+            file_row.hide()
+            mode_combo.currentTextChanged.connect(lambda t: (text_edit.show(), file_row.hide()) if t == "直接输入" else (text_edit.hide(), file_row.show()))
+            widget.mode_combo = mode_combo
+            widget.text_edit = text_edit
+            widget.file_edit = file_edit
         else:
             widget = QLineEdit(str(field.default or ""))
             widget.setPlaceholderText(field.placeholder)
@@ -161,6 +197,13 @@ class SimpleToolWindow(QWidget):
             path = QFileDialog.getExistingDirectory(self, "选择文件夹")
         else:
             path, _ = QFileDialog.getOpenFileName(self, "选择文件", str(Path.cwd()), "Text Files (*.txt);;Excel Files (*.xlsx);;All Files (*.*)")
+        if path:
+            edit.setText(path)
+            self.raise_()
+            self.activateWindow()
+
+    def _select_text_file(self, edit: QLineEdit) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "选择 TXT 文件", str(Path.cwd()), "Text Files (*.txt);;All Files (*.*)")
         if path:
             edit.setText(path)
             self.raise_()
@@ -178,6 +221,19 @@ class SimpleToolWindow(QWidget):
                 value = widget.currentText().strip()
             elif field.kind in {"file", "folder"}:
                 value = widget.path_edit.text().strip()
+            elif field.kind == "text_or_file":
+                if widget.mode_combo.currentText() == "TXT 文件":
+                    file_path = widget.file_edit.text().strip()
+                    if not file_path:
+                        QMessageBox.warning(self, "提示", f"请选择或输入：{field.label}")
+                        return None
+                    try:
+                        value = Path(file_path).read_text(encoding="utf-8").strip()
+                    except Exception as exc:
+                        QMessageBox.warning(self, "提示", f"无法读取文件：{exc}")
+                        return None
+                else:
+                    value = widget.text_edit.toPlainText().strip()
             else:
                 value = widget.text().strip()
             if field.required and not value and widget.isVisible():
@@ -191,7 +247,9 @@ class SimpleToolWindow(QWidget):
         if not widget:
             return
         widget.setVisible(visible)
-        form = self.layout().itemAt(0).layout()
+        form = self.form_layout
+        if form is None:
+            return
         label = form.labelForField(widget)
         if label:
             label.setVisible(visible)
@@ -210,10 +268,16 @@ class SimpleToolWindow(QWidget):
         combo.currentTextChanged.connect(on_changed)
         on_changed(combo.currentText())
 
-    def start(self) -> None:
-        if self.worker_thread and self.worker_thread.is_alive():
-            QMessageBox.information(self, "提示", "该工具正在运行。")
-            return
+    def _on_action_button(self) -> None:
+        text = self.action_button.text()
+        if text == "开始":
+            self._do_start()
+        elif text == "暂停":
+            self._toggle_pause()
+        elif text == "继续":
+            self._toggle_pause()
+
+    def _do_start(self) -> None:
         values = self.collect_values()
         if values is None:
             return
@@ -224,24 +288,60 @@ class SimpleToolWindow(QWidget):
             return
         self.log_text.clear()
         self.stop_event.clear()
-        self._set_running(True)
+        self.pause_event.clear()
+        self._set_state("running")
         self.logger.info("Task starting: %s", self.windowTitle())
-        self.worker_thread = threading.Thread(target=self._run_worker, args=(values,), daemon=True)
+        self.worker_thread = threading.Thread(target=self._run_worker, args=(values,), daemon=False)
         self.worker_thread.start()
+
+    def _toggle_pause(self) -> None:
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+            self._set_state("running")
+            self.append_log("继续运行...")
+        else:
+            self.pause_event.set()
+            self._set_state("paused")
+            self.append_log("已暂停，点击「继续」恢复运行。")
 
     def stop(self) -> None:
         self.stop_event.set()
+        self.pause_event.clear()
         self.logger.info("Stop requested: %s", self.windowTitle())
         self.append_log("正在停止，请稍候...")
+
+    def _text_to_tempfile(self, text: str, prefix: str = "input") -> str:
+        from src.core import build_output_path
+
+        path = build_output_path("temp", f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.txt")
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(text, encoding="utf-8")
+        return path
 
     def validate_values(self, values: dict[str, Any]) -> None:
         return None
 
-    def run_task(self, values: dict[str, Any], log_callback, finish_callback, stop_event) -> Any:
+    def tool_config_params(self) -> list[Any]:
+        return []
+
+    def _open_config(self) -> None:
+        from src.ui.config_dialog import ConfigDialog
+
+        params = self.tool_config_params()
+        if not params:
+            QMessageBox.information(self, "提示", "此工具没有可配置的参数。")
+            return
+        dialog = ConfigDialog(self.windowTitle(), params, self.config_values, self)
+        if dialog.exec_() == ConfigDialog.Accepted:
+            self.config_values = dialog.get_values()
+
+    def run_task(self, values: dict[str, Any], log_callback, finish_callback, stop_event, pause_event) -> Any:
         raise NotImplementedError
 
     def _run_worker(self, values: dict[str, Any]) -> None:
         result = {"path": None}
+        for key, val in self.config_values.items():
+            values[key] = val
 
         def log_callback(message: str) -> None:
             self.signals.log.emit(str(message))
@@ -250,7 +350,7 @@ class SimpleToolWindow(QWidget):
             result["path"] = path
 
         try:
-            returned = self.run_task(values, log_callback, finish_callback, self.stop_event)
+            returned = self.run_task(values, log_callback, finish_callback, self.stop_event, self.pause_event)
             if returned is not None:
                 result["path"] = returned
             self.logger.info("Task finished: %s output=%s", self.windowTitle(), result["path"] or "")
@@ -263,21 +363,32 @@ class SimpleToolWindow(QWidget):
         self.log_text.append(str(message))
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
-    def _set_running(self, running: bool) -> None:
-        self.start_button.setEnabled(not running)
-        self.stop_button.setEnabled(running)
-        self.start_button.setText("运行中..." if running else "开始")
+    def _set_state(self, state: str) -> None:
+        if state == "running":
+            self.action_button.setText("暂停")
+            self.action_button.setEnabled(True)
+            self.stop_button.setEnabled(True)
+        elif state == "paused":
+            self.action_button.setText("继续")
+            self.action_button.setEnabled(True)
+            self.stop_button.setEnabled(True)
+        else:
+            self.action_button.setText("开始")
+            self.action_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
 
     def _finish_success(self, output_path) -> None:
-        self._set_running(False)
+        self._set_state("idle")
         if self.stop_event.is_set():
             self.append_log("任务已停止。")
             return
         if output_path:
             QMessageBox.information(self, "完成", f"结果已保存到：\n{output_path}")
+        else:
+            self.append_log("任务完成。")
 
     def _finish_error(self, message: str) -> None:
-        self._set_running(False)
+        self._set_state("idle")
         self.append_log(f"运行失败：{message}")
         QMessageBox.critical(self, "运行失败", message)
 
@@ -294,6 +405,14 @@ class SimpleToolWindow(QWidget):
                 event.ignore()
                 return
             self.stop_event.set()
+            self.pause_event.clear()
+            self.worker_thread.join(timeout=5)
+            try:
+                self.signals.log.disconnect()
+                self.signals.finished.disconnect()
+                self.signals.failed.disconnect()
+            except TypeError:
+                pass
         else:
             reply = QMessageBox.question(
                 self,

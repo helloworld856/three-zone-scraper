@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 from googleapiclient.discovery import build
 
-from src.core import XlsxRowWriter, build_output_path, sanitize_csv_row, should_stop
+from src.core import XlsxRowWriter, build_output_path, sanitize_csv_row, should_stop, wait_if_paused
 
 CSV_FIELDS = ["作者主页链接", "作者名称", "作者ID", "粉丝量", "作者简介"]
 
@@ -79,10 +79,10 @@ def channel_row(profile_url: str, item: dict) -> dict:
         "作者简介": description,
     }
 
-def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, stop_event=None):
+def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
     output_path = None
     try:
-        with open(txt_file_path, "r", encoding="utf-8") as f:
+        with open(txt_file_path, "r", encoding="utf-8-sig") as f:
             profile_urls = [normalize_youtube_url(line.strip()) for line in f if line.strip() and not line.strip().startswith("#")]
 
         profile_urls = [url for url in profile_urls if "youtube.com" in url or "youtu.be" in url]
@@ -97,6 +97,8 @@ def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, st
         for index, profile_url in enumerate(profile_urls, 1):
             if should_stop(stop_event):
                 log_callback("任务已停止。")
+                break
+            if wait_if_paused(pause_event, stop_event):
                 break
             log_callback(f"[{index}/{len(profile_urls)}] 解析作者：{profile_url}")
             try:

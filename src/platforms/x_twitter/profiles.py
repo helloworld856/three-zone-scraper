@@ -9,9 +9,11 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_sleep,
     random_cooldown,
     sanitize_xlsx_cell,
     should_stop,
+    wait_if_paused,
     XlsxRowWriter,
 )
 
@@ -36,7 +38,7 @@ def normalize_x_url(url: str) -> str:
 
 def parse_tweet_links(txt_path: str) -> list[str]:
     links: list[str] = []
-    with open(txt_path, "r", encoding="utf-8") as f:
+    with open(txt_path, "r", encoding="utf-8-sig") as f:
         for line in f:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -48,7 +50,7 @@ def parse_tweet_links(txt_path: str) -> list[str]:
 
 def parse_profile_links(txt_path: str) -> list[str]:
     links: list[str] = []
-    with open(txt_path, "r", encoding="utf-8") as f:
+    with open(txt_path, "r", encoding="utf-8-sig") as f:
         for line in f:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -106,10 +108,14 @@ def find_target_article(page, target_status_id: str):
             continue
     return articles[0] if articles else None
 
-def load_tweet_page(page, tweet_url: str, target_status_id: str, log_callback) -> bool:
+def load_tweet_page(page, tweet_url: str, target_status_id: str, log_callback, page_timeout=None, tweet_ready_timeout=None) -> bool:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if tweet_ready_timeout is None:
+        tweet_ready_timeout = TWEET_READY_TIMEOUT
     try:
-        page.goto(tweet_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-        page.wait_for_selector('article[data-testid="tweet"]', timeout=TWEET_READY_TIMEOUT)
+        page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_timeout)
+        page.wait_for_selector('article[data-testid="tweet"]', timeout=tweet_ready_timeout)
         return True
     except Exception as e:
         current_url = getattr(page, "url", "")
@@ -119,7 +125,7 @@ def load_tweet_page(page, tweet_url: str, target_status_id: str, log_callback) -
         except Exception:
             pass
         log_callback(
-            f"  推文正文未在 {TWEET_READY_TIMEOUT // 1000} 秒内渲染，快速跳过。当前 URL: {current_url or '未知'}，标题: {title or '未知'}，错误: {e}"
+            f"  推文正文未在 {tweet_ready_timeout // 1000} 秒内渲染，快速跳过。当前 URL: {current_url or '未知'}，标题: {title or '未知'}，错误: {e}"
         )
     return False
 
@@ -188,10 +194,12 @@ def extract_view_count(article) -> tuple[str, float]:
             continue
     return "", 0
 
-def extract_followers_count(page, profile_url: str) -> str:
+def extract_followers_count(page, profile_url: str, page_timeout=None, stop_event=None) -> str:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
     try:
-        page.goto(profile_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-        time.sleep(3)
+        page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout)
+        interruptible_sleep(3, stop_event)
     except Exception:
         return ""
 
@@ -214,13 +222,13 @@ def extract_followers_count(page, profile_url: str) -> str:
             continue
     return ""
 
-def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_callback) -> dict | None:
+def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_callback, page_timeout=None, tweet_ready_timeout=None, stop_event=None) -> dict | None:
     target_status_id = extract_status_id(tweet_url)
     if not target_status_id:
         log_callback(f"跳过：无法解析推文 ID：{tweet_url}")
         return None
 
-    if not load_tweet_page(tweet_page, tweet_url, target_status_id, log_callback):
+    if not load_tweet_page(tweet_page, tweet_url, target_status_id, log_callback, page_timeout=page_timeout, tweet_ready_timeout=tweet_ready_timeout):
         log_callback(f"跳过：推文页面一直卡在 X 启动页或未渲染正文：{tweet_url}")
         return None
 
@@ -235,7 +243,7 @@ def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_ca
         return None
 
     view_text, view_value = extract_view_count(article)
-    followers = extract_followers_count(profile_page, author["profile_url"])
+    followers = extract_followers_count(profile_page, author["profile_url"], page_timeout=page_timeout, stop_event=stop_event)
 
     return {
         "推文链接": normalize_x_url(tweet_url),
@@ -247,12 +255,12 @@ def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_ca
         "_view_value": view_value,
     }
 
-def extract_profile_record(profile_page, profile_url: str, log_callback) -> dict | None:
+def extract_profile_record(profile_page, profile_url: str, log_callback, page_timeout=None, stop_event=None) -> dict | None:
     """Extract profile info directly from profile URL."""
     profile_url = normalize_x_url(profile_url)
     try:
-        profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-        time.sleep(3)
+        profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout if page_timeout is not None else PAGE_LOAD_TIMEOUT)
+        interruptible_sleep(3, stop_event)
     except Exception as e:
         log_callback(f"跳过：无法加载主页：{profile_url}，错误：{e}")
         return None
@@ -275,7 +283,7 @@ def extract_profile_record(profile_page, profile_url: str, log_callback) -> dict
         pass
 
     # Extract followers count
-    followers = extract_followers_count(profile_page, profile_url)
+    followers = extract_followers_count(profile_page, profile_url, page_timeout=page_timeout, stop_event=stop_event)
 
     return {
         "作者主页链接": profile_url,
@@ -294,7 +302,12 @@ def update_writer_row(writer: XlsxRowWriter, row_number: int, record: dict, fiel
         writer.worksheet.cell(row=row_number, column=column_number).value = sanitize_xlsx_cell(row.get(field, ""))
     writer.save()
 
-def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None):
+def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+    if config is None:
+        config = {}
+    page_load_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    tweet_ready_timeout = int(config.get("tweet_ready_timeout", TWEET_READY_TIMEOUT))
+
     output_path = None
     try:
         is_profile_mode = input_mode == "博主链接"
@@ -332,13 +345,15 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
                 
                 if is_profile_mode:
                     log_callback(f"[{index}/{len(links)}] 处理博主链接：{link}")
-                    record = extract_profile_record(profile_page, link, log_callback)
+                    record = extract_profile_record(profile_page, link, log_callback, page_timeout=page_load_timeout, stop_event=stop_event)
                 else:
                     log_callback(f"[{index}/{len(links)}] 处理推文：{link}")
-                    record = extract_tweet_author_record(tweet_page, profile_page, link, log_callback)
+                    record = extract_tweet_author_record(tweet_page, profile_page, link, log_callback, page_timeout=page_load_timeout, tweet_ready_timeout=tweet_ready_timeout, stop_event=stop_event)
                 
                 if not record:
                     continue

@@ -26,3 +26,11 @@ tiktok_test*.txt
 所需TXT/
 
 .idea/
+
+.vscode/
+.DS_Store
+Thumbs.db
+*.egg-info/
+dist/
+build/
+

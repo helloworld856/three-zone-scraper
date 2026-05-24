@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 from googleapiclient.discovery import build
 
-from src.core import XlsxRowWriter, build_output_path, sanitize_csv_row, sanitize_csv_rows, should_stop
+from src.core import XlsxRowWriter, build_output_path, sanitize_csv_row, sanitize_csv_rows, should_stop, wait_if_paused
 
 CSV_FIELDS = ["编号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
 TOP_COMMENT_LIMIT = 100
@@ -48,7 +48,7 @@ def parse_video_entries(txt_path: str) -> list[dict[str, object]]:
     seen_video_ids: set[str] = set()
     valid_line_count = 0
     duplicate_count = 0
-    with open(txt_path, "r", encoding="utf-8") as f:
+    with open(txt_path, "r", encoding="utf-8-sig") as f:
         for line in f:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -87,18 +87,22 @@ def non_text_placeholder(snippet: dict) -> str:
         return "[贴纸]"
     return "[非文本]"
 
-def fetch_top_level_comments(youtube, video_id: str, max_scan_comments: int, log_callback, stop_event=None) -> list[dict]:
+def fetch_top_level_comments(youtube, video_id: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, api_page_size: int = 100) -> list[dict]:
     comments: list[dict] = []
     next_page_token = None
+    page_size = max(1, min(api_page_size, 100))
 
     while len(comments) < max_scan_comments:
         if should_stop(stop_event):
-            log_callback("  任务已停止。")
+            if log_callback:
+                log_callback("  任务已停止。")
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         response = youtube.commentThreads().list(
             part="snippet",
             videoId=video_id,
-            maxResults=min(100, max_scan_comments - len(comments)),
+            maxResults=min(page_size, max_scan_comments - len(comments)),
             pageToken=next_page_token,
             order="relevance",
             textFormat="plainText",
@@ -136,12 +140,12 @@ def fetch_top_level_comments(youtube, video_id: str, max_scan_comments: int, log
 
     return comments
 
-def top_comment_rows(youtube, video_index: int, video_url: str, video_id: str, max_scan_comments: int, log_callback, stop_event=None) -> list[dict[str, str]]:
-    comments = fetch_top_level_comments(youtube, video_id, max_scan_comments, log_callback, stop_event)
+def top_comment_rows(youtube, video_index: int, video_url: str, video_id: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, top_comment_limit: int = TOP_COMMENT_LIMIT, api_page_size: int = 100) -> list[dict[str, str]]:
+    comments = fetch_top_level_comments(youtube, video_id, max_scan_comments, log_callback, stop_event, pause_event, api_page_size=api_page_size)
     comments.sort(key=lambda item: item["like_count"], reverse=True)
 
     rows: list[dict[str, str]] = []
-    for comment in comments[:TOP_COMMENT_LIMIT]:
+    for comment in comments[:top_comment_limit]:
         rows.append(
             {
                 "编号": str(video_index),
@@ -162,7 +166,12 @@ def empty_video_row(video_index: int, video_url: str) -> dict[str, str]:
         "发布时间": "",
     }
 
-def run_youtube_top_comments_spider(api_key: str, txt_path: str, max_scan_comments: int, log_callback, finish_callback, stop_event=None):
+def run_youtube_top_comments_spider(api_key: str, txt_path: str, max_scan_comments: int, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+    if config is None:
+        config = {}
+    top_comment_limit = int(config.get("youtube_comment_top_limit", TOP_COMMENT_LIMIT))
+    api_page_size = int(config.get("youtube_api_page_size", 100))
+
     output_path = None
     completed_path = None
     try:
@@ -182,13 +191,15 @@ def run_youtube_top_comments_spider(api_key: str, txt_path: str, max_scan_commen
             if should_stop(stop_event):
                 log_callback("任务已停止。")
                 break
+            if wait_if_paused(pause_event, stop_event):
+                break
             video_index = int(entry["编号"])
             video_url = str(entry["视频链接"])
             video_id = str(entry["视频ID"])
 
             log_callback(f"[{progress_index}/{len(entries)}] 读取评论，编号 {video_index}：{video_url}")
             try:
-                rows = top_comment_rows(youtube, video_index, video_url, video_id, max_scan_comments, log_callback, stop_event)
+                rows = top_comment_rows(youtube, video_index, video_url, video_id, max_scan_comments, log_callback, stop_event, pause_event, top_comment_limit, api_page_size)
                 if not rows:
                     rows = [empty_video_row(video_index, video_url)]
                 writer.writerows(sanitize_csv_rows(rows))
@@ -205,5 +216,6 @@ def run_youtube_top_comments_spider(api_key: str, txt_path: str, max_scan_commen
     except Exception as exc:
         log_callback(f"运行失败：{exc}")
         output_path = None
+        completed_path = None
     finally:
         finish_callback(completed_path)
