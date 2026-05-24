@@ -18,6 +18,7 @@ from src.core import (
     MultiSheetXlsxWriter,
     build_output_path,
     connect_existing_chromium,
+    expand_compact_number,
     sanitize_csv_cell,
     should_stop,
     wait_if_paused,
@@ -34,11 +35,10 @@ def _parse_date_range(start_str: str, end_str: str):
     return start_dt, end_dt
 
 
-CSV_FIELDS = ["序号", "帖子ID", "发布时间", "帖子内容", "帖子链接"]
+CSV_FIELDS = ["序号", "帖子ID", "发布时间", "帖子内容", "浏览量", "点赞量", "转发量", "评论数", "帖子链接"]
 PAGE_LOAD_TIMEOUT = 30000
 INITIAL_LOAD_DELAY = 2.0
-SCROLL_DELAY = 1.2
-SLOW_SCROLL_DELAY = 2.2
+SCROLL_DELAY = 3.2
 SCROLL_PX = 2800
 NO_NEW_SCROLL_LIMIT = 10
 DEFAULT_MAX_SCROLLS = 300
@@ -116,6 +116,10 @@ def normalize_tweet(tweet: dict[str, str]) -> dict[str, str]:
         "post_id": str(sanitize_csv_cell(post_id)),
         "published_at": str(sanitize_csv_cell(format_tweet_time(tweet.get("publishedAt", tweet.get("published_at", ""))))),
         "content": str(sanitize_csv_cell(tweet.get("content", ""))),
+        "views": str(sanitize_csv_cell(expand_compact_number(tweet.get("views", "")))),
+        "likes": str(sanitize_csv_cell(expand_compact_number(tweet.get("likes", "")))),
+        "retweets": str(sanitize_csv_cell(expand_compact_number(tweet.get("retweets", "")))),
+        "replies": str(sanitize_csv_cell(expand_compact_number(tweet.get("replies", "")))),
         "url": str(sanitize_csv_cell(tweet.get("url", ""))),
     }
 
@@ -126,6 +130,10 @@ def row_from_tweet(index: int, tweet: dict[str, str]) -> dict[str, str]:
         "帖子ID": tweet.get("post_id") or tweet.get("postId", ""),
         "发布时间": tweet.get("published_at") or tweet.get("publishedAt", ""),
         "帖子内容": tweet.get("content", ""),
+        "浏览量": tweet.get("views", ""),
+        "点赞量": tweet.get("likes", ""),
+        "转发量": tweet.get("retweets", ""),
+        "评论数": tweet.get("replies", ""),
         "帖子链接": tweet.get("url", ""),
     }
 
@@ -178,6 +186,15 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
                 if (article.querySelector('[data-testid="card.wrapper"], [data-testid="card.layoutLarge.media"], [data-testid="card.layoutSmall.media"]')) types.push('卡片');
                 return types.length ? `[${types.join('+')}]` : '[非文本]';
             };
+            const ariaMetric = (root, testIds) => {
+                for (const id of testIds) {
+                    const el = root.querySelector(`[data-testid="${id}"]`);
+                    const aria = el ? el.getAttribute('aria-label') : '';
+                    const match = aria ? aria.match(/([\\d,]+(\\.\\d+)?\\s*[KkMmBb]?)/) : null;
+                    if (match) return match[1].replace(/,/g, '');
+                }
+                return '';
+            };
 
             for (const article of document.querySelectorAll('article[data-testid="tweet"], article')) {
                 try {
@@ -196,6 +213,10 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
                         publishedAt,
                         content: text || nonTextContent(article),
                         url: href,
+                        views: ariaMetric(article, ['app-text-transition-container']) || '',
+                        likes: ariaMetric(article, ['like', 'unlike']) || '',
+                        retweets: ariaMetric(article, ['retweet', 'unretweet']) || '',
+                        replies: ariaMetric(article, ['reply']) || '',
                     });
                 } catch (error) {}
             }
@@ -333,7 +354,7 @@ def collect_profile_tweets(
             break
 
         page.evaluate(f"window.scrollBy(0, {SCROLL_PX})")
-        time.sleep(SLOW_SCROLL_DELAY if no_new_count else scroll_delay)
+        time.sleep(scroll_delay + 1.0 if no_new_count else scroll_delay)
 
     if writer and pending_rows:
         if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):

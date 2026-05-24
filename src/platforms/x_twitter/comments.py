@@ -23,7 +23,7 @@ from src.core import (
 
 TOP_COMMENT_LIMIT = 100
 DEFAULT_SCAN_LIMIT = 500
-SCROLL_PAUSE = 2.0
+SCROLL_PAUSE = 4.0
 PAGE_LOAD_TIMEOUT = 30000
 NO_NEW_SCROLL_LIMIT = 5
 CSV_FIELDS = ["编号", "帖文链接", "点赞数", "评论内容", "评论发布时间"]

@@ -135,6 +135,22 @@ def get_tweet_url(article) -> str:
     return status_urls[0] if status_urls else ""
 
 def get_tweet_text(article) -> str:
+    try:
+        show_more_selectors = [
+            '[data-testid="tweet-text-show-more-link"]',
+            'span:has-text("Show more")',
+            'span:has-text("もっと見る")',
+            'div[role="button"]:has-text("Show more")',
+        ]
+        for selector in show_more_selectors:
+            try:
+                btn = article.locator(selector).first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(force=True, timeout=2000)
+            except Exception:
+                pass
+    except Exception:
+        pass
     return safe_text(article.locator('[data-testid="tweetText"]'), default="无文字内容")
 
 def get_tweet_time(article) -> str:
@@ -200,8 +216,8 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
     if config is None:
         config = {}
     search_page_timeout = int(config.get("search_page_timeout", 40000))
-    scroll_cooldown_min = float(config.get("scroll_cooldown_min", 3.0))
-    scroll_cooldown_max = float(config.get("scroll_cooldown_max", 5.0))
+    scroll_cooldown_min = float(config.get("scroll_cooldown_min", 5.0))
+    scroll_cooldown_max = float(config.get("scroll_cooldown_max", 7.0))
     no_change_threshold = int(config.get("no_change_strikes", 5))
 
     try:
