@@ -30,7 +30,7 @@ CSV_FIELDS = [
     "原始搜索词",
     "完整搜索语法",
     "序号",
-    "推文的文字内容",
+    "推文内容",
     "浏览量",
     "点赞量",
     "转发量",
@@ -112,24 +112,47 @@ def get_tweet_url(article) -> str:
     return status_urls[0] if status_urls else ""
 
 def get_tweet_text(article) -> str:
-    try:
-        show_more_selectors = [
-            '[data-testid="tweet-text-show-more-link"]',
-            'span:has-text("Show more")',
-            'span:has-text("もっと見る")',
-            'div[role="button"]:has-text("Show more")',
-        ]
-        for selector in show_more_selectors:
-            try:
-                btn = article.locator(selector).first
-                if btn.count() > 0 and btn.is_visible():
-                    btn.click(force=True, timeout=2000)
-                    time.sleep(0.3)
-                    break
-            except Exception:
-                pass
-    except Exception:
-        pass
+    expand_selectors = [
+        '[data-testid="tweet-text-show-more-link"]',
+        '[data-testid="tweetText"] span:has-text("Show more")',
+        '[data-testid="tweetText"] span:has-text("more")',
+        'span:has-text("Show more")',
+        'span:has-text("もっと見る")',
+        'span:has-text("더 보기")',
+        'div[role="button"]:has-text("Show more")',
+        '[role="button"]:has-text("Show more")',
+        '[role="link"]:has-text("Show more")',
+    ]
+    clicked = False
+    for selector in expand_selectors:
+        try:
+            btn = article.locator(selector).first
+            if btn.count() > 0:
+                try:
+                    btn.scroll_into_view_if_needed()
+                except Exception:
+                    pass
+                btn.click(force=True, timeout=2000)
+                time.sleep(0.5)
+                clicked = True
+                break
+        except Exception:
+            continue
+    if not clicked:
+        try:
+            article.evaluate("""el => {
+                const showMore = (
+                    el.querySelector('[data-testid="tweet-text-show-more-link"]')
+                    || [...el.querySelectorAll('span, div, button, a')].find(e => {
+                        const t = (e.innerText || '').trim().toLowerCase();
+                        return t === 'show more' || t === 'もっと見る' || t === '더 보기';
+                    })
+                );
+                if (showMore) { showMore.scrollIntoView({block: 'center'}); showMore.click(); }
+            }""")
+            time.sleep(0.5)
+        except Exception:
+            pass
     return safe_text(article.locator('[data-testid="tweetText"]'), default="无文字内容")
 
 def get_tweet_time(article) -> str:
@@ -362,7 +385,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                                     "原始搜索词": base_keyword,
                                     "完整搜索语法": final_query,
                                     "序号": str(total_count + 1),
-                                    "推文的文字内容": get_tweet_text(article) + get_media_label(article),
+                                    "推文内容": get_tweet_text(article) + get_media_label(article),
                                     "浏览量": extract_metric_from_article(article, 'a[href*="/analytics"]'),
                                     "点赞量": extract_metric_from_article(article, '[data-testid="like"], [data-testid="unlike"]'),
                                     "转发量": extract_metric_from_article(article, '[data-testid="retweet"], [data-testid="unretweet"]'),
