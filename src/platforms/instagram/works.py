@@ -18,13 +18,15 @@ from src.core import (
     XlsxRowWriter,
     build_output_path,
     connect_existing_chromium,
+    expand_compact_number,
+    interruptible_sleep,
     sanitize_csv_cell,
     should_stop,
     wait_if_paused,
 )
 
 
-CSV_FIELDS = ["序号", "作品ID", "作品链接", "发布时间", "作品内容", "浏览量", "评论数", "点赞数"]
+CSV_FIELDS = ["序号", "作品ID", "作品链接", "发布时间", "作品内容", "浏览量", "评论数", "点赞数", "分享数", "收藏数"]
 PAGE_LOAD_TIMEOUT = 45000
 INITIAL_LOAD_DELAY = 3.5
 SCROLL_DELAY = 3.0
@@ -149,12 +151,12 @@ def extract_work_id(work_url: str) -> str:
     return match.group(1) if match else ""
 
 
-def normalize_metric_text(text: str) -> str:
+def normalize_metric_text(text: str, default: str = "") -> str:
     value = re.sub(r"\s+", " ", text or "").strip()
     if not value:
-        return ""
+        return default
     match = re.search(r"(\d[\d,.]*(?:\.\d+)?\s*(?:K|M|B|万|萬|亿|億)?)", value, flags=re.I)
-    return match.group(1).strip() if match else ""
+    return expand_compact_number(match.group(1).strip(), default=default) if match else default
 
 
 def format_instagram_time(raw_time: str) -> str:
@@ -182,7 +184,14 @@ def build_content(caption: str, media_type: str) -> str:
     if looks_like_instagram_auto_alt(text):
         text = ""
     title = text.splitlines()[0].strip() if text else ""
-    return f"{title}[视频]" if title else "[视频]"
+    mt = (media_type or "").lower()
+    if mt in ("reel", "video"):
+        label = "[视频]"
+    elif mt == "carousel":
+        label = "[轮播]"
+    else:
+        label = "[图片]"
+    return f"{title}{label}" if title else label
 
 
 def extract_visible_work_links(page) -> list[dict[str, str]]:
@@ -315,7 +324,7 @@ def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrol
         raise ValueError(f"无效的 Instagram 作者主页链接：{profile_url}")
 
     page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_timeout)
-    time.sleep(INITIAL_LOAD_DELAY)
+    interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
     try:
         page.wait_for_selector('main, article, a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]', timeout=12000)
     except PlaywrightTimeoutError:
@@ -362,7 +371,7 @@ def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrol
                 break
 
         page.evaluate(f"window.scrollBy(0, {scroll_px})")
-        time.sleep(scroll_delay)
+        interruptible_sleep(scroll_delay, stop_event)
 
     return works
 
@@ -420,10 +429,20 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
             };
             const parseJsonScripts = () => {
                 const roots = [];
-                for (const script of document.querySelectorAll('script[type="application/json"]')) {
+                // Search ALL script tags for data containing the shortcode
+                for (const script of document.querySelectorAll('script')) {
                     const raw = script.textContent || '';
-                    if (!raw || (shortcode && !raw.includes(shortcode))) continue;
+                    if (!raw || raw.length > 800000) continue;
+                    if (shortcode && !raw.includes(shortcode)) continue;
                     try { roots.push(JSON.parse(raw)); } catch (error) {}
+                }
+                // Fallback: parse application/json and ld+json scripts without shortcode filter
+                if (!roots.length) {
+                    for (const script of document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"]')) {
+                        const raw = script.textContent || '';
+                        if (!raw) continue;
+                        try { roots.push(JSON.parse(raw)); } catch (error) {}
+                    }
                 }
                 return roots;
             };
@@ -511,8 +530,8 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 if (structured) return structured;
                 const patterns = [];
                 for (const name of names) {
-                    patterns.push(new RegExp(`"${name}"\\\\s*:\\\\s*([0-9]+)`, 'i'));
-                    patterns.push(new RegExp(`"${name}"\\\\s*:\\\\s*\\\\{\\\\s*"count"\\\\s*:\\\\s*([0-9]+)`, 'i'));
+                    patterns.push(new RegExp(`"${name}"\\\\s*:\\\\s*"?([0-9][0-9,.]*[KMBkmb]?)"?`, 'i'));
+                    patterns.push(new RegExp(`"${name}"\\\\s*:\\\\s*\\\\{\\\\s*"count"\\\\s*:\\\\s*"?([0-9][0-9,.]*[KMBkmb]?)"?`, 'i'));
                 }
                 return firstMatch(patterns);
             };
@@ -528,6 +547,15 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 /^Photo by .+ on [A-Z][a-z]+ \\d{1,2}, \\d{4}\\.?(\\s+May be .*)?$/i.test(value || '') ||
                 /^Photo shared by .+ on [A-Z][a-z]+ \\d{1,2}, \\d{4}\\.?(\\s+May be .*)?$/i.test(value || '')
             );
+            // Expand truncated caption by clicking "... more"
+            const moreTexts = ['more', '...more', '…more', '更多', 'さらに表示', '더 보기'];
+            for (const el of document.querySelectorAll('article span, article div[role="button"]')) {
+                const t = (el.textContent || '').trim().toLowerCase();
+                if (moreTexts.some(mt => t === mt || t.endsWith(mt))) {
+                    try { el.click(); } catch (_) {}
+                    break;
+                }
+            }
             const lines = Array.from(document.querySelectorAll('article h1, article h2, article span, article div[dir="auto"]'))
                 .map(node => text(node))
                 .filter(Boolean);
@@ -550,7 +578,8 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                         node.getAttribute('title') || '',
                     ]),
                 ].map(line => line.trim()).filter(Boolean);
-                return bodyLines.find(line => patterns.some(pattern => pattern.test(line))) || '';
+                const matches = bodyLines.filter(line => patterns.some(pattern => pattern.test(line)));
+                return matches.find(line => /\\d/.test(line)) || matches[0] || '';
             };
             let mediaType = fallbackMediaType || '';
             const article = document.querySelector('article') || document;
@@ -564,9 +593,21 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 parseEpoch(valueFromStructured(['taken_at_timestamp', 'taken_at', 'date', 'created_time', 'created_at'])) ||
                 parseEpoch(firstMatch([/"taken_at_timestamp"\\s*:\\s*([0-9]+)/, /"taken_at"\\s*:\\s*([0-9]+)/, /"date"\\s*:\\s*([0-9]{10})/, /"created_time"\\s*:\\s*([0-9]{10})/]))
             );
+            const viewFromDom = () => {
+                const root = document.querySelector('article') || document;
+                for (const el of root.querySelectorAll('span, a, div')) {
+                    const t = (el.textContent || '').trim();
+                    if (/\\d[\\d,.]*\\s*(views?|播放|次观看|再生|조회수)/i.test(t)) {
+                        const m = t.match(/([\\d][\\d,.]*(?:\\.\\d+)?[KMBkmb]?)/);
+                        if (m) return m[1];
+                    }
+                }
+                return '';
+            };
             const views = (
-                metricFromJson(['play_count', 'view_count', 'views', 'video_view_count', 'video_play_count', 'ig_play_count', 'clips_play_count', 'fb_play_count']) ||
-                lineWith([/views?/i, /播放/, /观看/, /次观看/, /再生/])
+                metricFromJson(['play_count', 'view_count', 'views', 'video_view_count', 'video_play_count', 'ig_play_count', 'clips_play_count', 'fb_play_count', 'media_play_count']) ||
+                lineWith([/views?/i, /播放/, /观看/, /次观看/, /再生/, /조회수/]) ||
+                viewFromDom()
             );
             const comments = (
                 metricFromJson(['comment_count', 'comments_count', 'edge_media_to_comment', 'edge_media_preview_comment', 'edge_media_to_parent_comment']) ||
@@ -576,6 +617,14 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 metricFromJson(['like_count', 'likes_count', 'edge_media_preview_like', 'edge_liked_by', 'preview_like_count']) ||
                 lineWith([/likes?/i, /赞/, /讚/, /次赞/])
             );
+            const shares = (
+                metricFromJson(['share_count', 'shares_count', 'edge_media_share_count', 'edge_shared_by', 'shared_count']) ||
+                lineWith([/shares?/i, /分享/, /共有/])
+            );
+            const saves = (
+                metricFromJson(['save_count', 'saves_count', 'edge_media_save_count', 'edge_saved_media', 'saved_count', 'bookmark_count']) ||
+                lineWith([/saves?/i, /收藏/, /儲存/])
+            );
 
             return {
                 caption,
@@ -584,6 +633,8 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 views,
                 comments,
                 likes,
+                shares,
+                saves,
             };
         }""",
         {"fallbackMediaType": fallback_media_type or ""},
@@ -598,7 +649,11 @@ def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None
         if should_stop(stop_event):
             raise InstagramStoppedError("任务已停止")
         response = page.goto(work["link"], wait_until="domcontentloaded", timeout=page_timeout)
-        time.sleep(INITIAL_LOAD_DELAY)
+        try:
+            page.wait_for_selector('article, section', timeout=8000)
+        except Exception:
+            pass
+        interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
         if should_stop(stop_event):
             raise InstagramStoppedError("任务已停止")
         if not is_instagram_rate_limited_page(page, response):
@@ -625,10 +680,12 @@ def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None
         "id": work.get("id", ""),
         "link": work.get("link", ""),
         "published_at": format_instagram_time(detail.get("publishedAt", "")),
-        "content": build_content(detail.get("caption", ""), "video"),
+        "content": build_content(detail.get("caption", ""), detail.get("mediaType", "")),
         "views": normalize_metric_text(detail.get("views", "")),
         "comments": normalize_metric_text(detail.get("comments", "")),
         "likes": normalize_metric_text(detail.get("likes", "")),
+        "shares": normalize_metric_text(detail.get("shares", "")),
+        "saves": normalize_metric_text(detail.get("saves", "")),
     }
 
 
@@ -642,6 +699,8 @@ def row_from_work(index: int, work: dict[str, str]) -> dict[str, str]:
         "浏览量": sanitize_csv_cell(work.get("views", "")),
         "评论数": sanitize_csv_cell(work.get("comments", "")),
         "点赞数": sanitize_csv_cell(work.get("likes", "")),
+        "分享数": sanitize_csv_cell(work.get("shares", "")),
+        "收藏数": sanitize_csv_cell(work.get("saves", "")),
     }
 
 
