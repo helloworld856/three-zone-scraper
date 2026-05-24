@@ -107,29 +107,6 @@ def article_contains_nested_tweet(article) -> bool:
     except Exception:
         return False
 
-def article_has_media(article) -> bool:
-    selectors = [
-        "video",
-        '[data-testid="videoPlayer"]',
-        '[data-testid="tweetPhoto"]',
-        'a[href*="/photo/"]',
-        'img[src*="twimg.com/media"]',
-        'div[aria-label*="Image"]',
-        'div[aria-label*="图片"]',
-        'div[aria-label*="画像"]',
-        '[aria-label*="Play"]',
-        '[aria-label*="play"]',
-        '[aria-label*="播放"]',
-        '[aria-label*="再生"]',
-    ]
-    for selector in selectors:
-        try:
-            if article.locator(selector).count() > 0:
-                return True
-        except Exception:
-            continue
-    return False
-
 def get_tweet_url(article) -> str:
     status_urls = collect_status_urls(article)
     return status_urls[0] if status_urls else ""
@@ -186,12 +163,47 @@ def extract_metric_value(locator, default: str = "未知") -> str:
 def extract_metric_from_article(article, selector: str, default: str = "未知") -> str:
     return extract_metric_value(article.locator(selector), default=default)
 
+def get_media_label(article) -> str:
+    labels: list[str] = []
+    video_selectors = [
+        "video",
+        '[data-testid="videoPlayer"]',
+        '[aria-label*="Play"]',
+        '[aria-label*="play"]',
+        '[aria-label*="播放"]',
+        '[aria-label*="再生"]',
+    ]
+    photo_selectors = [
+        '[data-testid="tweetPhoto"]',
+        'a[href*="/photo/"]',
+        'img[src*="twimg.com/media"]',
+        'div[aria-label*="Image"]',
+        'div[aria-label*="图片"]',
+        'div[aria-label*="画像"]',
+    ]
+    for selector in video_selectors:
+        try:
+            if article.locator(selector).count() > 0:
+                labels.append("视频")
+                break
+        except Exception:
+            continue
+    for selector in photo_selectors:
+        try:
+            if article.locator(selector).count() > 0:
+                labels.append("图片")
+                break
+        except Exception:
+            continue
+    if (article.inner_text() or "").split('\n')[0].strip().lower() == "gif":
+        labels.append("GIF")
+    return f"[{' + '.join(labels)}]" if labels else ""
+
+
 def should_keep_article(article) -> bool:
     if is_repost_context(get_social_context(article)):
         return False
     if article_contains_nested_tweet(article):
-        return False
-    if not article_has_media(article):
         return False
     return True
 
@@ -234,7 +246,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
 
             search_page = context.new_page()
             detail_page = context.new_page()
-            log_callback("已接管浏览器。过滤规则：跳过转推、跳过引用/嵌套推文，保留含视频或图片的原创推文。\n")
+            log_callback("已接管浏览器。过滤规则：跳过转推、跳过引用/嵌套推文。\n")
 
             limit_time_bool = adv_params.get("limit_time") == "是"
             get_comments_bool = adv_params.get("get_comments") == "是"
@@ -350,7 +362,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                                     "原始搜索词": base_keyword,
                                     "完整搜索语法": final_query,
                                     "序号": str(total_count + 1),
-                                    "推文的文字内容": get_tweet_text(article),
+                                    "推文的文字内容": get_tweet_text(article) + get_media_label(article),
                                     "浏览量": extract_metric_from_article(article, 'a[href*="/analytics"]'),
                                     "点赞量": extract_metric_from_article(article, '[data-testid="like"], [data-testid="unlike"]'),
                                     "转发量": extract_metric_from_article(article, '[data-testid="retweet"], [data-testid="unretweet"]'),
