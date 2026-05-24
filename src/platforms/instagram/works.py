@@ -26,7 +26,7 @@ from src.core import (
 )
 
 
-CSV_FIELDS = ["序号", "作品ID", "作品链接", "发布时间", "作品内容", "浏览量", "评论数", "点赞数", "分享数", "收藏数"]
+CSV_FIELDS = ["序号", "作品ID", "作品链接", "发布时间", "作品内容", "评论数", "点赞数"]
 PAGE_LOAD_TIMEOUT = 45000
 INITIAL_LOAD_DELAY = 3.5
 SCROLL_DELAY = 3.0
@@ -593,22 +593,6 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 parseEpoch(valueFromStructured(['taken_at_timestamp', 'taken_at', 'date', 'created_time', 'created_at'])) ||
                 parseEpoch(firstMatch([/"taken_at_timestamp"\\s*:\\s*([0-9]+)/, /"taken_at"\\s*:\\s*([0-9]+)/, /"date"\\s*:\\s*([0-9]{10})/, /"created_time"\\s*:\\s*([0-9]{10})/]))
             );
-            const viewFromDom = () => {
-                const root = document.querySelector('article') || document;
-                for (const el of root.querySelectorAll('span, a, div')) {
-                    const t = (el.textContent || '').trim();
-                    if (/\\d[\\d,.]*\\s*(views?|播放|次观看|再生|조회수)/i.test(t)) {
-                        const m = t.match(/([\\d][\\d,.]*(?:\\.\\d+)?[KMBkmb]?)/);
-                        if (m) return m[1];
-                    }
-                }
-                return '';
-            };
-            const views = (
-                metricFromJson(['play_count', 'view_count', 'views', 'video_view_count', 'video_play_count', 'ig_play_count', 'clips_play_count', 'fb_play_count', 'media_play_count']) ||
-                lineWith([/views?/i, /播放/, /观看/, /次观看/, /再生/, /조회수/]) ||
-                viewFromDom()
-            );
             const comments = (
                 metricFromJson(['comment_count', 'comments_count', 'edge_media_to_comment', 'edge_media_preview_comment', 'edge_media_to_parent_comment']) ||
                 lineWith([/comments?/i, /评论/, /留言/])
@@ -617,24 +601,13 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
                 metricFromJson(['like_count', 'likes_count', 'edge_media_preview_like', 'edge_liked_by', 'preview_like_count']) ||
                 lineWith([/likes?/i, /赞/, /讚/, /次赞/])
             );
-            const shares = (
-                metricFromJson(['share_count', 'shares_count', 'edge_media_share_count', 'edge_shared_by', 'shared_count']) ||
-                lineWith([/shares?/i, /分享/, /共有/])
-            );
-            const saves = (
-                metricFromJson(['save_count', 'saves_count', 'edge_media_save_count', 'edge_saved_media', 'saved_count', 'bookmark_count']) ||
-                lineWith([/saves?/i, /收藏/, /儲存/])
-            );
 
             return {
                 caption,
                 mediaType,
                 publishedAt,
-                views,
                 comments,
                 likes,
-                shares,
-                saves,
             };
         }""",
         {"fallbackMediaType": fallback_media_type or ""},
@@ -681,11 +654,8 @@ def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None
         "link": work.get("link", ""),
         "published_at": format_instagram_time(detail.get("publishedAt", "")),
         "content": build_content(detail.get("caption", ""), detail.get("mediaType", "")),
-        "views": normalize_metric_text(detail.get("views", "")),
         "comments": normalize_metric_text(detail.get("comments", "")),
         "likes": normalize_metric_text(detail.get("likes", "")),
-        "shares": normalize_metric_text(detail.get("shares", "")),
-        "saves": normalize_metric_text(detail.get("saves", "")),
     }
 
 
@@ -696,11 +666,8 @@ def row_from_work(index: int, work: dict[str, str]) -> dict[str, str]:
         "作品链接": sanitize_csv_cell(work.get("link", "")),
         "发布时间": sanitize_csv_cell(work.get("published_at", "")),
         "作品内容": sanitize_csv_cell(work.get("content", "")),
-        "浏览量": sanitize_csv_cell(work.get("views", "")),
         "评论数": sanitize_csv_cell(work.get("comments", "")),
         "点赞数": sanitize_csv_cell(work.get("likes", "")),
-        "分享数": sanitize_csv_cell(work.get("shares", "")),
-        "收藏数": sanitize_csv_cell(work.get("saves", "")),
     }
 
 
@@ -739,6 +706,8 @@ def run_instagram_profile_works_spider(
     save_batch_val = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
     cooldown_min_val = float(config.get("cooldown_min", COOLDOWN_MIN_SECONDS))
     cooldown_max_val = float(config.get("cooldown_max", COOLDOWN_MAX_SECONDS))
+    detail_delay_min_val = float(config.get("detail_delay_min", DETAIL_DELAY_MIN_SECONDS))
+    detail_delay_max_val = float(config.get("detail_delay_max", DETAIL_DELAY_MAX_SECONDS))
     max_scrolls = int(config.get("max_scrolls", max_scrolls))
 
     completed_path = None
@@ -817,8 +786,8 @@ def run_instagram_profile_works_spider(
                                 )
                             else:
                                 interruptible_random_sleep(
-                                    DETAIL_DELAY_MIN_SECONDS,
-                                    DETAIL_DELAY_MAX_SECONDS,
+                                    detail_delay_min_val,
+                                    detail_delay_max_val,
                                     log_callback,
                                     stop_event,
                                     reason="详情页读取完成",
