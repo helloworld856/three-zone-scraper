@@ -1,4 +1,4 @@
-# 四平台数据爬取工具
+# 社媒平台数据爬取工具
 
 一个 PyQt 桌面工具台，用于集中启动 YouTube、TikTok、X/Twitter、Instagram 四个平台的数据采集工具，并提供 AIGC 标题判断、关键词 XLSX 合并等数据处理功能。
 
