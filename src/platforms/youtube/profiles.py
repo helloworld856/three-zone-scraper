@@ -91,7 +91,7 @@ def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, st
             return
 
         youtube = build("youtube", "v3", developerKey=api_key)
-        output_path = build_output_path("youtube", f"youtube_channel_profiles_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("youtube", f"youtube_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
 
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
         for index, profile_url in enumerate(profile_urls, 1):

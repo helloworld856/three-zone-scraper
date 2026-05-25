@@ -616,7 +616,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
         config = {}
     context_size_val = int(config.get("context_size", CONTEXT_SIZE))
     max_profile_scrolls_val = int(config.get("max_profile_scrolls", MAX_PROFILE_SCROLLS))
-    profile_scroll_pause_val = float(config.get("profile_scroll_pause", PROFILE_SCROLL_PAUSE))
+    profile_scroll_pause_val = float(config.get("scroll_interval", PROFILE_SCROLL_PAUSE))
     page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
 
     output_path = None
@@ -627,7 +627,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
             log_callback("TXT 中没有有效的\"推文链接 + 博主主页链接\"行。")
             return
 
-        output_path = build_output_path("x", f"x_paired_context_metrics_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("x", f"x_context_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, OUTPUT_FIELDS)
 
         with sync_playwright() as p:

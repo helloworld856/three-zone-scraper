@@ -15,7 +15,7 @@ def _lines(value: str) -> list[str]:
 class YouTubeKeywordWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(
-            "YouTube 关键词视频基础信息",
+            "YouTube 关键词搜索",
             [
                 FieldSpec("api_key", "Google API Key", required=True),
                 FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="是"),
@@ -40,16 +40,16 @@ class YouTubeKeywordWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
-            ConfigParam("max_results", "每个关键词最多视频数", kind="int", default=5000, minimum=1, maximum=5000),
-            ConfigParam("youtube_search_batch_size", "API搜索每页条数", kind="int", default=50, minimum=1, maximum=50),
-            ConfigParam("youtube_video_batch_size", "API视频详情每批条数", kind="int", default=50, minimum=1, maximum=50),
-            ConfigParam("youtube_comment_top_limit", "每个视频评论最多输出条数", kind="int", default=100, minimum=1, maximum=500),
+            ConfigParam("max_results", "最多搜索结果数", kind="int", default=5000, minimum=1, maximum=5000),
+            ConfigParam("youtube_search_batch_size", "搜索每页条数", kind="int", default=50, minimum=1, maximum=50),
+            ConfigParam("youtube_video_batch_size", "视频详情每批条数", kind="int", default=50, minimum=1, maximum=50),
+            ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.keyword import run_youtube_spider
 
-        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k == "max_results"}
+        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_results", "comment_top_limit")}
         return run_youtube_spider(
             values["api_key"],
             _lines(values["keywords"]),
@@ -70,10 +70,10 @@ class YouTubeKeywordWindow(SimpleToolWindow):
 class YouTubeProfilesWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(
-            "YouTube 作者信息提取",
+            "YouTube 博主信息",
             [
                 FieldSpec("api_key", "Google API Key", required=True),
-                FieldSpec("txt_path", "作者主页链接，每行一个", kind="text_or_file", required=True, placeholder="https://www.youtube.com/@username"),
+                FieldSpec("txt_path", "博主主页链接，每行一个", kind="text_or_file", required=True, placeholder="https://www.youtube.com/@username"),
             ],
         )
 
@@ -86,7 +86,7 @@ class YouTubeProfilesWindow(SimpleToolWindow):
 class YouTubeContextWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(
-            "YouTube 目标视频前后指标",
+            "YouTube 视频上下文数据",
             [
                 FieldSpec("api_key", "Google API Key", required=True),
                 FieldSpec("txt_path", "视频链接 + 博主主页，每行一对", kind="text_or_file", required=True, placeholder="视频链接 博主主页链接"),
@@ -96,7 +96,7 @@ class YouTubeContextWindow(SimpleToolWindow):
     def tool_config_params(self):
         return [
             ConfigParam("context_size", "目标视频前后各取几条", kind="int", default=5, minimum=1, maximum=20),
-            ConfigParam("max_upload_pages", "上传列表最多翻页数", kind="int", default=200, minimum=10, maximum=1000),
+            ConfigParam("max_upload_pages", "最多翻页数", kind="int", default=200, minimum=10, maximum=1000),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
@@ -109,12 +109,12 @@ class YouTubeContextWindow(SimpleToolWindow):
 class YouTubeChannelWorksWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(
-            "YouTube 作者主页作品采集",
+            "YouTube 博主作品采集",
             [
                 FieldSpec("api_key", "Google API Key", required=True),
                 FieldSpec(
                     "channel_urls",
-                    "作者主页链接，每行一个",
+                    "博主主页链接，每行一个",
                     kind="text_or_file",
                     placeholder="https://www.youtube.com/@username",
                     required=True,
@@ -132,26 +132,26 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
 
     def validate_values(self, values):
         if not _lines(values["channel_urls"]):
-            raise ValueError("至少需要输入一个 YouTube 作者主页链接。")
+            raise ValueError("至少需要输入一个 YouTube 博主主页链接。")
         if values.get("limit_time") == "是":
             from src.platforms.youtube.keyword import parse_date_range
             parse_date_range(values["start_date"], values["end_date"])
 
     def tool_config_params(self):
         return [
-            ConfigParam("max_video_items", "每个作者最多视频/Shorts数", kind="int", default=5000, minimum=1, maximum=5000),
+            ConfigParam("max_video_items", "最多作品数", kind="int", default=5000, minimum=1, maximum=5000),
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
             ConfigParam("scroll_delay", "滚动间隔(秒)", kind="float", default=0.8, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
-            ConfigParam("no_new_post_limit", "无新内容停止阈值", kind="int", default=6, minimum=2, maximum=50),
-            ConfigParam("scroll_px", "每次滚动像素", kind="int", default=2800, minimum=500, maximum=10000, step=100),
-            ConfigParam("max_post_scrolls", "Posts 最大滚动次数", kind="int", default=200, minimum=1, maximum=5000),
-            ConfigParam("save_batch_size", "每N条保存一次", kind="int", default=10, minimum=1, maximum=100),
+            ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=6, minimum=2, maximum=50),
+            ConfigParam("scroll_px", "每次滚动像素(px)", kind="int", default=2800, minimum=500, maximum=10000, step=100),
+            ConfigParam("max_post_scrolls", "帖子最大滚动次数", kind="int", default=200, minimum=1, maximum=5000),
+            ConfigParam("save_batch_size", "每批保存条数", kind="int", default=10, minimum=1, maximum=100),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.channel_works import run_youtube_channel_works_spider
 
-        config = {k: v for k, v in values.items() if k in ("max_video_items", "page_load_timeout", "scroll_delay", "no_new_post_limit", "scroll_px", "max_post_scrolls", "save_batch_size")}
+        config = {k: v for k, v in values.items() if k in ("max_video_items", "page_load_timeout", "scroll_delay", "no_new_scroll_limit", "scroll_px", "max_post_scrolls", "save_batch_size")}
         return run_youtube_channel_works_spider(
             values["api_key"],
             values["channel_urls"],
@@ -173,7 +173,7 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
 class YouTubeCommentsWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(
-            "YouTube 视频高赞主楼评论",
+            "YouTube 热门评论",
             [
                 FieldSpec("api_key", "Google API Key", required=True),
                 FieldSpec("txt_path", "视频链接，每行一个", kind="text_or_file", required=True, placeholder="https://www.youtube.com/watch?v=xxxx"),
@@ -182,15 +182,15 @@ class YouTubeCommentsWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
-            ConfigParam("max_scan_comments", "每个视频最多扫描主楼评论数", kind="int", default=500, minimum=100, maximum=10000),
-            ConfigParam("youtube_comment_top_limit", "每个视频评论最多输出条数", kind="int", default=100, minimum=1, maximum=500),
-            ConfigParam("youtube_api_page_size", "API评论每页条数", kind="int", default=100, minimum=1, maximum=100),
+            ConfigParam("max_scan_comments", "每个视频最多扫描评论数", kind="int", default=500, minimum=100, maximum=10000),
+            ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),
+            ConfigParam("youtube_api_page_size", "评论每页条数", kind="int", default=100, minimum=1, maximum=100),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.comments import run_youtube_top_comments_spider
 
-        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k == "max_scan_comments"}
+        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_scan_comments", "comment_top_limit")}
         return run_youtube_top_comments_spider(
             values["api_key"],
             self._text_to_tempfile(values["txt_path"]),

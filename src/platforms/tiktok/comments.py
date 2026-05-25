@@ -895,9 +895,9 @@ def run_tiktok_top_comments_spider(
 ):
     if config is None:
         config = {}
-    comment_top_limit = int(config.get("tiktok_comment_top_limit", TOP_COMMENT_LIMIT))
+    comment_top_limit = int(config.get("comment_top_limit", TOP_COMMENT_LIMIT))
     config_page_load_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
-    config_scroll_pause = float(config.get("scroll_pause", SCROLL_PAUSE))
+    config_scroll_pause = float(config.get("scroll_interval", SCROLL_PAUSE))
     config_max_scroll_rounds = int(config.get("max_scroll_rounds", MAX_SCROLL_ROUNDS))
 
     completed_path = None
@@ -913,7 +913,7 @@ def run_tiktok_top_comments_spider(
             return
 
         max_scan_comments = max(comment_top_limit, int(max_scan_comments or DEFAULT_SCAN_LIMIT))
-        output_path = build_output_path("tiktok", f"tiktok_top_comments_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("tiktok", f"tiktok_top_comments_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
         log_callback(f"输出文件：{output_path}")
         log_callback(f"最多扫描主楼评论数：{max_scan_comments}，每个视频输出点赞量前 {comment_top_limit} 条。")

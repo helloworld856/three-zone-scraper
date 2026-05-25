@@ -169,7 +169,7 @@ def empty_video_row(video_index: int, video_url: str) -> dict[str, str]:
 def run_youtube_top_comments_spider(api_key: str, txt_path: str, max_scan_comments: int, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
     if config is None:
         config = {}
-    top_comment_limit = int(config.get("youtube_comment_top_limit", TOP_COMMENT_LIMIT))
+    top_comment_limit = int(config.get("comment_top_limit", TOP_COMMENT_LIMIT))
     api_page_size = int(config.get("youtube_api_page_size", 100))
 
     output_path = None
@@ -184,7 +184,7 @@ def run_youtube_top_comments_spider(api_key: str, txt_path: str, max_scan_commen
         log_callback(f"读取到 {valid_line_count} 行有效视频链接，去重后唯一视频 {len(entries)} 个，重复链接 {duplicate_count} 行。")
 
         youtube = build("youtube", "v3", developerKey=api_key)
-        output_path = build_output_path("youtube", f"youtube_top_comments_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("youtube", f"youtube_top_comments_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
         for progress_index, entry in enumerate(entries, 1):

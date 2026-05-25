@@ -238,7 +238,7 @@ def run_x_tweet_metrics_spider(
     if config is None:
         config = {}
     page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
-    tweet_comment_top_limit = int(config.get("tweet_comment_top_limit", 100))
+    tweet_comment_top_limit = int(config.get("comment_top_limit", 100))
 
     completed_path = None
     page = None
@@ -255,7 +255,7 @@ def run_x_tweet_metrics_spider(
         get_comments_bool = get_comments_str == "是"
         scan_limit = max(int(max_comments), tweet_comment_top_limit)
 
-        output_path = build_output_path("x", f"x_tweet_metrics_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("x", f"x_tweet_metrics_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         if get_comments_bool:
             comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
             writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields})

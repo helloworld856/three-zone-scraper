@@ -255,7 +255,7 @@ def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback,
         if should_stop(stop_event):
             log_callback("任务已停止。")
             return
-        output_path = build_output_path("youtube", f"youtube_paired_context_metrics_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("youtube", f"youtube_context_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, OUTPUT_FIELDS)
         youtube = build("youtube", "v3", developerKey=api_key)
         channel_cache: dict[str, dict] = {}

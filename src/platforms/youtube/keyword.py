@@ -139,7 +139,7 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
         config = {}
     search_batch_size = int(config.get("youtube_search_batch_size", 50))
     video_batch_size = int(config.get("youtube_video_batch_size", 50))
-    comment_top_limit = int(config.get("youtube_comment_top_limit", 100))
+    comment_top_limit = int(config.get("comment_top_limit", 100))
     output_path = None
     output_paths: list[str] = []
     try:
@@ -150,7 +150,7 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
             start_dt, end_dt = parse_date_range(start_date, end_date)
 
         youtube = build("youtube", "v3", developerKey=api_key)
-        run_stamp = time.strftime("%Y%m%d")
+        run_stamp = time.strftime("%Y%m%d_%H%M%S")
 
         for index, keyword in enumerate(keywords_list, 1):
             if should_stop(stop_event):
@@ -160,7 +160,7 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
                 break
             output_path = build_output_path(
                 "youtube",
-                f"youtube_keyword_videos_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
+                f"youtube_keyword_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
             )
             output_paths.append(output_path)
 

@@ -120,7 +120,7 @@ def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback,
             log_callback("TXT 中没有找到有效的 TikTok 博主主页链接。")
             return
 
-        output_path = build_output_path("tiktok", f"tiktok_profile_directory_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("tiktok", f"tiktok_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
         with sync_playwright() as p:

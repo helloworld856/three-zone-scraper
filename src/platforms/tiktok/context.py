@@ -740,7 +740,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
     api_page_size = int(config.get("api_page_size", API_PAGE_SIZE))
     max_api_pages = int(config.get("max_api_pages", MAX_API_PAGES))
     max_profile_scrolls = int(config.get("max_profile_scrolls", MAX_PROFILE_SCROLLS))
-    profile_scroll_pause = float(config.get("profile_scroll_pause", PROFILE_SCROLL_PAUSE))
+    profile_scroll_pause = float(config.get("scroll_interval", PROFILE_SCROLL_PAUSE))
 
     output_path = None
     completed_path = None
@@ -750,7 +750,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
             log_callback("TXT 中没有有效的“视频链接 博主链接”行。")
             return
 
-        output_path = build_output_path("tiktok", f"tiktok_paired_context_metrics_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("tiktok", f"tiktok_context_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
         with sync_playwright() as p:
@@ -762,8 +762,8 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                 return
 
             target_page = context.new_page()
-            profile_page = context.new_page()
-            detail_page = context.new_page()
+            profile_page = None
+            detail_page = None
 
             for index, (target_video_url, profile_url) in enumerate(pairs, 1):
                 if should_stop(stop_event):
@@ -808,6 +808,10 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                         log_callback("  未从目标视频页解析到 secUid，切换到主页兜底。")
 
                     if not rows:
+                        if profile_page is None:
+                            profile_page = context.new_page()
+                        if detail_page is None:
+                            detail_page = context.new_page()
                         rows = fallback_rows_from_profile(profile_page, detail_page, profile_candidates, target_video_id, resolved_video_url, log_callback, stop_event, pause_event, context_size, max_profile_scrolls, profile_scroll_pause)
 
                     if not rows:
@@ -823,7 +827,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                     log_callback(f"  处理失败：{exc}")
 
             for opened_page in (target_page, profile_page, detail_page):
-                if not opened_page.is_closed():
+                if opened_page is not None and not opened_page.is_closed():
                     opened_page.close()
 
         writer.save()

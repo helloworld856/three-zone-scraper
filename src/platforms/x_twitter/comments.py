@@ -595,9 +595,9 @@ def run_x_top_comments_spider(
 ):
     if config is None:
         config = {}
-    tweet_comment_top_limit = int(config.get("tweet_comment_top_limit", TOP_COMMENT_LIMIT))
+    tweet_comment_top_limit = int(config.get("comment_top_limit", TOP_COMMENT_LIMIT))
     page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
-    scroll_pause_val = float(config.get("scroll_pause", SCROLL_PAUSE))
+    scroll_pause_val = float(config.get("scroll_interval", SCROLL_PAUSE))
     no_new_scroll_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
 
     completed_path = None
@@ -613,7 +613,7 @@ def run_x_top_comments_spider(
             return
 
         max_comments = max(tweet_comment_top_limit, int(max_comments or DEFAULT_SCAN_LIMIT))
-        output_path = build_output_path("x", f"x_tweet_comments_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("x", f"x_top_comments_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
         with sync_playwright() as playwright:

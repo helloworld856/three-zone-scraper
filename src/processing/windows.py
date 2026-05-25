@@ -12,7 +12,7 @@ from src.ui.config_dialog import ConfigParam
 class JudgeAIGCWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(
-            "AIGC 标题判断",
+            "AIGC 内容判断",
             [
                 FieldSpec("input_path", "输入内容，每行一条", kind="text_or_file", required=True, placeholder="序号 标题"),
                 FieldSpec("row_limit", "每批行数", kind="int", default=aigc_config.ROW_LIMIT, minimum=1, maximum=100000),
@@ -57,7 +57,7 @@ class JudgeAIGCWindow(SimpleToolWindow):
 class XlsxMergeWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(
-            "关键词 XLSX 合并",
+            "XLSX 文件合并",
             [
                 FieldSpec("folder", "XLSX 文件夹", kind="folder", required=True),
                 FieldSpec("platform", "平台前缀", kind="combo", default="tiktok", options=("youtube", "tiktok", "x")),

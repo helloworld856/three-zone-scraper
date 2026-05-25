@@ -613,7 +613,7 @@ def run_youtube_channel_works_spider(
         config = {}
     page_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
     scroll_delay_val = float(config.get("scroll_delay", POST_SCROLL_DELAY))
-    no_new_limit = int(config.get("no_new_post_limit", NO_NEW_POST_LIMIT))
+    no_new_limit = int(config.get("no_new_scroll_limit", NO_NEW_POST_LIMIT))
     scroll_px_val = int(config.get("scroll_px", POST_SCROLL_PX))
     max_post_scrolls = int(config.get("max_post_scrolls", max_post_scrolls))
 
@@ -642,7 +642,7 @@ def run_youtube_channel_works_spider(
         if limit_time_bool:
             start_dt, end_dt = parse_date_range(start_date, end_date)
             
-        output_path = build_output_path("youtube", f"youtube_channel_works_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("youtube", f"youtube_channel_works_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         if get_comments_bool:
             comment_fields = ["序号", "作品链接", "评论的点赞量", "评论内容", "评论发布时间"]
             writer = MultiSheetXlsxWriter(output_path, {"作品信息": CSV_FIELDS, "评论信息": comment_fields})

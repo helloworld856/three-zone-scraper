@@ -370,10 +370,10 @@ def extract_video_row(page, keyword: str, video_url: str, play_count: str = "") 
 def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str, start_date, end_date, get_comments_str, max_comments, cdp_port_or_url, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
     if config is None:
         config = {}
-    search_scroll_pause = float(config.get("search_scroll_pause", SEARCH_SCROLL_PAUSE))
+    search_scroll_pause = float(config.get("scroll_interval", SEARCH_SCROLL_PAUSE))
     config_max_search_scrolls = int(config.get("max_search_scrolls", MAX_SEARCH_SCROLLS))
     no_new_scroll_limit = int(config.get("no_new_scroll_limit", 12))
-    comment_top_limit = int(config.get("tiktok_comment_top_limit", 100))
+    comment_top_limit = int(config.get("comment_top_limit", 100))
 
     output_path = None
     output_paths: list[str] = []
@@ -395,7 +395,7 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
             search_page = context.new_page()
             detail_page = context.new_page()
 
-            run_stamp = time.strftime("%Y%m%d")
+            run_stamp = time.strftime("%Y%m%d_%H%M%S")
             for index, keyword in enumerate(keywords_list, 1):
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
@@ -404,7 +404,7 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                     break
                 output_path = build_output_path(
                     "tiktok",
-                    f"tiktok_keyword_videos_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
+                    f"tiktok_keyword_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
                 )
                 output_paths.append(output_path)
                 log_callback(f"[{index}/{len(keywords_list)}] 搜索关键词：{keyword}")

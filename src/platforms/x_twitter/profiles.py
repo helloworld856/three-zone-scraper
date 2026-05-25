@@ -333,9 +333,9 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
                 log_callback(f"连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。错误：{e}")
                 return
 
-            tweet_page = context.new_page()
+            tweet_page = context.new_page() if not is_profile_mode else None
             profile_page = context.new_page()
-            output_path = build_output_path("x", f"x_tweet_author_profiles_{time.strftime('%Y%m%d')}.xlsx")
+            output_path = build_output_path("x", f"x_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
             writer = XlsxRowWriter(output_path, output_fields)
             best_by_author: dict[str, dict] = {}
             row_by_author: dict[str, int] = {}
@@ -386,7 +386,7 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
                         break
 
             for opened_page in (tweet_page, profile_page):
-                if not opened_page.is_closed():
+                if opened_page is not None and not opened_page.is_closed():
                     opened_page.close()
 
         if not output_path:

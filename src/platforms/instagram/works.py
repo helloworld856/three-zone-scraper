@@ -681,7 +681,7 @@ def run_instagram_profile_works_spider(
     if config is None:
         config = {}
     page_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
-    scroll_delay_val = float(config.get("scroll_delay", SCROLL_DELAY))
+    scroll_delay_val = float(config.get("scroll_interval", SCROLL_DELAY))
     scroll_px_val = int(config.get("scroll_px", SCROLL_PX))
     no_new_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
     save_batch_val = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
@@ -703,7 +703,7 @@ def run_instagram_profile_works_spider(
             log_line(log_callback, "未读取到有效的 Instagram 作者主页链接。")
             return
 
-        output_path = build_output_path("instagram", f"instagram_profile_works_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("instagram", f"instagram_profile_works_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
         serial_number = 1
 

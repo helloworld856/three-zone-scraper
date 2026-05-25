@@ -56,7 +56,7 @@ def merge_xlsx_files(
 ) -> tuple[str, int, int]:
     platform_prefix = normalize_platform(platform)
     output_path = Path(output_file) if output_file else Path(
-        build_output_path(platform_prefix, f"{platform_prefix}_merge_{time.strftime('%Y%m%d')}.xlsx")
+        build_output_path(platform_prefix, f"{platform_prefix}_merge_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 

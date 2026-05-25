@@ -464,7 +464,7 @@ def run_x_profile_tweets_spider(
     if config is None:
         config = {}
     page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
-    scroll_delay_val = float(config.get("scroll_delay", SCROLL_DELAY))
+    scroll_delay_val = float(config.get("scroll_interval", SCROLL_DELAY))
     no_new_scroll_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
     save_batch_size_val = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
     cooldown_min_val = float(config.get("cooldown_min", COOLDOWN_MIN_SECONDS))
@@ -490,7 +490,7 @@ def run_x_profile_tweets_spider(
             start_dt, end_dt = _parse_date_range(start_date, end_date)
 
         max_comments_val = max(10, int(max_comments))
-        output_path = build_output_path("x", f"x_profile_tweets_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("x", f"x_profile_tweets_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         
         if get_comments_bool:
             comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
@@ -510,7 +510,7 @@ def run_x_profile_tweets_spider(
                 return
 
             page = context.new_page()
-            detail_page = context.new_page()
+            detail_page = context.new_page() if get_comments_bool else None
 
             for profile_index, profile_url in enumerate(profile_urls, 1):
                 if should_stop(stop_event):
@@ -551,7 +551,7 @@ def run_x_profile_tweets_spider(
                     log_line(log_callback, f"  跳过：{exc}")
 
             for opened_page in (page, detail_page):
-                if not opened_page.is_closed():
+                if opened_page is not None and not opened_page.is_closed():
                     opened_page.close()
 
         completed_path = output_path

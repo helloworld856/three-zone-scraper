@@ -522,8 +522,8 @@ def run_tiktok_profile_videos_spider(
     max_scrolls = int(config.get("max_scrolls", max_scrolls))
     link_batch_size = int(config.get("link_batch_size", LINK_BATCH_SIZE))
     save_batch_size = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
-    batch_wait_min = float(config.get("batch_wait_min", BATCH_WAIT_MIN_SECONDS))
-    batch_wait_max = float(config.get("batch_wait_max", BATCH_WAIT_MAX_SECONDS))
+    batch_wait_min = float(config.get("cooldown_min", BATCH_WAIT_MIN_SECONDS))
+    batch_wait_max = float(config.get("cooldown_max", BATCH_WAIT_MAX_SECONDS))
 
     output_path = None
     completed_path = None
@@ -550,7 +550,7 @@ def run_tiktok_profile_videos_spider(
         if get_video_info_bool:
             video_fields.extend(["发布日期", "视频简介", "点赞数", "评论数", "收藏量", "分享数"])
 
-        output_path = build_output_path("tiktok", f"tiktok_profile_videos_{time.strftime('%Y%m%d')}.xlsx")
+        output_path = build_output_path("tiktok", f"tiktok_profile_videos_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         if get_comments_bool:
             comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
             writer = MultiSheetXlsxWriter(output_path, {"视频信息": video_fields, "评论信息": comment_fields})

@@ -23,7 +23,7 @@ from src.core import (
 )
 from src.platforms.x_twitter.comments import extract_comments
 
-MAX_SEARCH_SCROLLS = 30
+MAX_SEARCH_SCROLLS = 200
 STATUS_PATH_RE = re.compile(r"(/[^/]+/status/\d+)")
 
 CSV_FIELDS = [
@@ -254,9 +254,9 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
     if config is None:
         config = {}
     search_page_timeout = int(config.get("search_page_timeout", 40000))
-    scroll_cooldown_min = float(config.get("scroll_cooldown_min", 5.0))
-    scroll_cooldown_max = float(config.get("scroll_cooldown_max", 7.0))
-    no_change_threshold = int(config.get("no_change_strikes", 5))
+    scroll_cooldown_min = float(config.get("cooldown_min", 5.0))
+    scroll_cooldown_max = float(config.get("cooldown_max", 7.0))
+    no_change_threshold = int(config.get("no_new_scroll_limit", 5))
 
     try:
         with sync_playwright() as p:
@@ -268,13 +268,13 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                 finish_callback()
                 return
 
-            search_page = context.new_page()
-            detail_page = context.new_page()
-            log_callback("已接管浏览器。过滤规则：跳过转推、跳过引用/嵌套推文。\n")
-
             limit_time_bool = adv_params.get("limit_time") == "是"
             get_comments_bool = adv_params.get("get_comments") == "是"
             max_comments = int(adv_params.get("max_comments", 500))
+
+            search_page = context.new_page()
+            detail_page = context.new_page() if get_comments_bool else None
+            log_callback("已接管浏览器。过滤规则：跳过转推、跳过引用/嵌套推文。\n")
             max_search_scrolls = int(config.get("max_scrolls", MAX_SEARCH_SCROLLS))
 
             for base_keyword in keywords_list:
@@ -284,7 +284,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                 if wait_if_paused(pause_event, stop_event):
                     break
                 safe_filename = re.sub(r'[\\/*?:"<>|]', "", base_keyword)
-                output_path = build_output_path("x", f"X_Media_Tweets_{safe_filename}_{time.strftime('%Y%m%d')}.xlsx")
+                output_path = build_output_path("x", f"x_keyword_{safe_filename}_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
                 
                 if get_comments_bool:
                     comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
@@ -459,7 +459,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                 writer.save()
 
             for opened_page in (search_page, detail_page):
-                if not opened_page.is_closed():
+                if opened_page is not None and not opened_page.is_closed():
                     opened_page.close()
             log_callback("\nX 关键词媒体推文搜索任务结束。")
             finish_callback(output_path)
