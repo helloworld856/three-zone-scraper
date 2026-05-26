@@ -41,6 +41,7 @@ BATCH_WAIT_MAX_SECONDS = 20.0
 NO_NEW_SCROLL_LIMIT = 10
 DEFAULT_MAX_SCROLLS = 500
 SCROLL_PX = 3600
+MIN_GUARANTEED_VIDEOS = 5
 
 
 def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime]:
@@ -377,17 +378,22 @@ def extract_video_detail(page, video_url: str) -> dict[str, str]:
     }
 
 
-def row_from_detail(index: int, detail: dict[str, str]) -> dict[str, str]:
-    return {
+def row_from_detail(index: int, detail: dict[str, str], play_count: str = "") -> dict[str, str]:
+    row = {
         "序号": str(index),
         "视频链接": detail.get("video_url", ""),
+    }
+    if play_count or "播放量" in detail:
+        row["播放量"] = str(play_count or detail.get("播放量", ""))
+    row.update({
         "发布日期": detail.get("published_at", ""),
         "视频简介": detail.get("desc", ""),
         "点赞数": detail.get("likes", ""),
         "评论数": detail.get("comments", ""),
         "收藏量": detail.get("collects", ""),
         "分享数": detail.get("shares", ""),
-    }
+    })
+    return row
 
 
 def wait_after_detail(log_callback, stop_event=None, pause_event=None) -> bool:
@@ -415,7 +421,10 @@ def process_video_batch(
     save_batch_size: int = SAVE_BATCH_SIZE,
     batch_wait_min: float = BATCH_WAIT_MIN_SECONDS,
     batch_wait_max: float = BATCH_WAIT_MAX_SECONDS,
-) -> tuple[int, int, bool]:
+    processed_count: int = 0,
+    play_counts_map: dict[str, int] = None,
+    fetch_play_counts_bool: bool = False,
+) -> tuple[int, int, bool, int]:
     stop_profile = False
     batch_written = 0
     log_line(log_callback, f"  开始爬取本批 {len(video_links)} 条视频。")
@@ -436,18 +445,34 @@ def process_video_batch(
                 if limit_time_bool and start_dt and end_dt:
                     publish_dt = parse_publish_date(published_at)
                     if publish_dt and publish_dt.date() < start_dt.date():
-                        log_line(log_callback, f"      停止当前主页：视频发布时间早于开始日期（{published_at}）。")
-                        stop_profile = True
-                        wait_after_detail(log_callback, stop_event, pause_event=pause_event)
-                        break
+                        if processed_count >= MIN_GUARANTEED_VIDEOS:
+                            log_line(log_callback, f"      停止当前主页：视频发布时间早于开始日期（{published_at}）。")
+                            stop_profile = True
+                            wait_after_detail(log_callback, stop_event, pause_event=pause_event)
+                            break
+                        else:
+                            log_line(log_callback, f"      跳过：发布时间超出范围（{published_at}），当前在保底前 {MIN_GUARANTEED_VIDEOS} 条内，不终止。")
+                            processed_count += 1
+                            if wait_after_detail(log_callback, stop_event, pause_event=pause_event):
+                                break
+                            continue
 
                     if not in_date_range(published_at, start_dt, end_dt):
                         log_line(log_callback, f"      跳过：发布时间不在范围内（{published_at or '未解析'}）。")
+                        processed_count += 1
                         if wait_after_detail(log_callback, stop_event, pause_event=pause_event):
                             break
                         continue
 
-            row_base = row_from_detail(serial_number, detail) if get_video_info_bool else {"序号": str(serial_number), "视频链接": video_url}
+            processed_count += 1
+            vid = parse_video_id(video_url)
+            play_count = ""
+            if fetch_play_counts_bool and play_counts_map and vid in play_counts_map:
+                play_count = str(play_counts_map[vid])
+                
+            row_base = row_from_detail(serial_number, detail, play_count) if get_video_info_bool else {"序号": str(serial_number), "视频链接": video_url}
+            if fetch_play_counts_bool and not get_video_info_bool:
+                row_base["播放量"] = play_count
 
             if get_comments_bool:
                 comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event, pause_event=pause_event)
@@ -495,7 +520,7 @@ def process_video_batch(
         if wait_after_detail(log_callback, stop_event, pause_event=pause_event):
             break
 
-    return serial_number, written_count, stop_profile
+    return serial_number, written_count, stop_profile, processed_count
 
 
 def run_tiktok_profile_videos_spider(
@@ -507,6 +532,7 @@ def run_tiktok_profile_videos_spider(
     get_video_info_str: str,
     get_comments_str: str,
     max_comments: int,
+    fetch_play_counts_str: str,
     cdp_port_or_url: str,
     log_callback,
     finish_callback,
@@ -546,7 +572,11 @@ def run_tiktok_profile_videos_spider(
         if limit_time_bool:
             start_dt, end_dt = parse_date_range(start_date, end_date)
 
+        fetch_play_counts_bool = (fetch_play_counts_str == "是")
+
         video_fields = ["序号", "视频链接"]
+        if fetch_play_counts_bool:
+            video_fields.append("播放量")
         if get_video_info_bool:
             video_fields.extend(["发布日期", "视频简介", "点赞数", "评论数", "收藏量", "分享数"])
 
@@ -585,6 +615,24 @@ def run_tiktok_profile_videos_spider(
                     continue
 
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取主页：{profile_url}")
+                
+                play_counts_map = {}
+                def handle_response(response):
+                    if "/api/post/item_list" in response.url and "secUid" in response.url:
+                        try:
+                            text = response.text()
+                            if text.strip():
+                                body = json.loads(text)
+                                for item in body.get("itemList", []):
+                                    vid = item.get("id", "")
+                                    if vid:
+                                        stats = item.get("stats", {})
+                                        play_counts_map[vid] = stats.get("playCount", 0)
+                        except Exception:
+                            pass
+
+                if fetch_play_counts_bool:
+                    profile_page.on("response", handle_response)
                 try:
                     profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=page_load_timeout)
                     interruptible_sleep(2.5, stop_event)
@@ -596,6 +644,7 @@ def run_tiktok_profile_videos_spider(
                 pending_links: list[str] = []
                 no_new_count = 0
                 stop_profile = False
+                processed_count = 0
 
                 for scroll_index in range(actual_max_scrolls):
                     if should_stop(stop_event):
@@ -614,7 +663,7 @@ def run_tiktok_profile_videos_spider(
                     while len(pending_links) >= link_batch_size and not stop_profile and not should_stop(stop_event):
                         batch = pending_links[:link_batch_size]
                         del pending_links[:link_batch_size]
-                        serial_number, written_count, stop_profile = process_video_batch(
+                        serial_number, written_count, stop_profile, processed_count = process_video_batch(
                             detail_page,
                             batch,
                             start_dt,
@@ -632,13 +681,16 @@ def run_tiktok_profile_videos_spider(
                             save_batch_size=save_batch_size,
                             batch_wait_min=batch_wait_min,
                             batch_wait_max=batch_wait_max,
+                            processed_count=processed_count,
+                            play_counts_map=play_counts_map,
+                            fetch_play_counts_bool=fetch_play_counts_bool,
                         )
                     if stop_profile:
                         break
 
                     if no_new_count >= no_new_limit:
                         if pending_links and not should_stop(stop_event):
-                            serial_number, written_count, stop_profile = process_video_batch(
+                            serial_number, written_count, stop_profile, processed_count = process_video_batch(
                                 detail_page,
                                 pending_links,
                                 start_dt,
@@ -656,6 +708,9 @@ def run_tiktok_profile_videos_spider(
                                 save_batch_size=save_batch_size,
                                 batch_wait_min=batch_wait_min,
                                 batch_wait_max=batch_wait_max,
+                                processed_count=processed_count,
+                                play_counts_map=play_counts_map,
+                                fetch_play_counts_bool=fetch_play_counts_bool,
                             )
                             pending_links = []
                         log_line(log_callback, "  连续多次没有新视频链接，结束当前主页。")
@@ -666,7 +721,7 @@ def run_tiktok_profile_videos_spider(
                         break
 
                 if pending_links and not stop_profile and not should_stop(stop_event):
-                    serial_number, written_count, stop_profile = process_video_batch(
+                    serial_number, written_count, stop_profile, processed_count = process_video_batch(
                         detail_page,
                         pending_links,
                         start_dt,
@@ -684,7 +739,16 @@ def run_tiktok_profile_videos_spider(
                         save_batch_size=save_batch_size,
                         batch_wait_min=batch_wait_min,
                         batch_wait_max=batch_wait_max,
-                    )
+                            processed_count=processed_count,
+                            play_counts_map=play_counts_map,
+                            fetch_play_counts_bool=fetch_play_counts_bool,
+                        )
+
+            if fetch_play_counts_bool:
+                try:
+                    profile_page.remove_listener("response", handle_response)
+                except Exception:
+                    pass
 
             for opened_page in (profile_page, detail_page):
                 if not opened_page.is_closed():

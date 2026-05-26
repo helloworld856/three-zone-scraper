@@ -98,10 +98,11 @@ class TikTokProfileVideosWindow(SimpleToolWindow):
                 FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="是"),
                 FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
                 FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
+                FieldSpec("fetch_play_counts", "是否爬取播放量？", kind="combo", options=("否", "是"), default="否"),
                 FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("max_comments", "最多获取评论数", kind="int", default=100, minimum=10, maximum=10000),
             ],
-            height=760,
+            height=820,
         )
         self.bind_field_visibility("limit_time", "是", ["start_date", "end_date"])
         self.bind_field_visibility("get_comments", "是", ["max_comments"])
@@ -137,7 +138,41 @@ class TikTokProfileVideosWindow(SimpleToolWindow):
             "是",
             values["get_comments"],
             int(values["max_comments"]),
+            values.get("fetch_play_counts", "否"),
             DEFAULT_TIKTOK_CDP_URL,
+            log_callback,
+            finish_callback,
+            stop_event,
+            pause_event=pause_event,
+            config=config,
+        )
+
+
+class TikTokProfilePlayCountsWindow(SimpleToolWindow):
+    def __init__(self) -> None:
+        super().__init__(
+            "TikTok 博主视频播放量",
+            [
+                FieldSpec("txt_path", "博主主页链接，每行一个", kind="text_or_file", required=True, placeholder="https://www.tiktok.com/@username"),
+            ],
+        )
+
+    def tool_config_params(self):
+        return [
+            ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
+            ConfigParam("scroll_interval", "滚动间隔(秒)", kind="float", default=2.5, minimum=0.5, maximum=10.0, step=0.1, decimals=1),
+            ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=10, minimum=2, maximum=50),
+            ConfigParam("max_scrolls", "最大滚动次数", kind="int", default=200, minimum=1, maximum=999999),
+        ]
+
+    def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
+        from src.platforms.tiktok.profile_play_counts import run_tiktok_profile_play_counts_spider
+
+        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "scroll_interval", "no_new_scroll_limit", "max_scrolls")}
+        return run_tiktok_profile_play_counts_spider(
+            self._text_to_tempfile(values["txt_path"]),
+            DEFAULT_TIKTOK_CDP_URL,
+            int(values.get("max_scrolls", 200)),
             log_callback,
             finish_callback,
             stop_event,
