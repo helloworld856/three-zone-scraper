@@ -131,6 +131,15 @@ TOOLS: list[ToolSpec] = [
         tags=("TikTok", "profile", "videos", "metrics", "date"),
     ),
     ToolSpec(
+        tool_id="tiktok_profile_play_counts",
+        name="TikTok 博主视频播放量",
+        category="TikTok",
+        summary="拦截 API 采集博主主页所有视频的链接和播放量，不受创作者隐藏设置影响。",
+        entrypoint="src.platforms.tiktok.windows.TikTokProfilePlayCountsWindow",
+        implementation_path="platforms/tiktok/profile_play_counts.py",
+        tags=("TikTok", "profile", "play_count", "api"),
+    ),
+    ToolSpec(
         tool_id="tiktok_paired_context_metrics",
         name="TikTok 视频上下文数据",
         category="TikTok",
