@@ -10,7 +10,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
 from src.core.config_store import (
