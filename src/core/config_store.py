@@ -41,6 +41,9 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "max_search_scrolls": 360,
         "no_new_scroll_limit": 12,
         "comment_top_limit": 100,
+        "max_parallel_tabs": 1,
+        "max_comment_tabs": 1,
+        "max_queue_size": 5000,
     },
     "tiktok_profile_directory": {
         "page_load_timeout": 35000,
@@ -82,6 +85,9 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "cooldown_max": 7.0,
         "no_new_scroll_limit": 5,
         "max_scrolls": 200,
+        "max_parallel_tabs": 1,
+        "max_comment_tabs": 1,
+        "max_queue_size": 5000,
     },
     "x_tweet_author_profiles": {
         "page_load_timeout": 45000,

@@ -4,6 +4,7 @@ from src.core.browser import (
     DEFAULT_X_CDP_URL,
     connect_existing_chromium,
     debug_port_from_cdp_url,
+    ensure_chrome_for_cdp,
 )
 from src.core.tiktok_metadata import (
     extract_tiktok_video_title,
@@ -25,6 +26,7 @@ __all__ = [
     "build_output_path",
     "connect_existing_chromium",
     "debug_port_from_cdp_url",
+    "ensure_chrome_for_cdp",
     "get_output_root",
     "get_platform_output_dir",
     "get_workspace_root",

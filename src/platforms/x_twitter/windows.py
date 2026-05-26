@@ -18,6 +18,12 @@ class XKeywordWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
+            ConfigParam("max_parallel_tabs", "关键词爬取并行tab数", kind="int", default=1, minimum=1, maximum=3,
+                        tooltip="同时处理几个关键词。1=顺序处理。最大3。"),
+            ConfigParam("max_comment_tabs", "评论爬取并行tab数", kind="int", default=1, minimum=1, maximum=3,
+                        tooltip="每个关键词同时用几个tab采集评论。1=顺序。最大3。"),
+            ConfigParam("max_queue_size", "评论队列最大长度", kind="int", default=5000, minimum=10, maximum=10000,
+                        tooltip="待爬评论链接的缓冲上限。满了则暂停采集新推文。"),
             ConfigParam("slice_days", "时间切片跨度(天)", kind="int", default=7, minimum=1, maximum=365),
             ConfigParam("search_page_timeout", "页面加载超时(毫秒)", kind="int", default=40000, minimum=10000, maximum=120000, step=1000),
             ConfigParam("cooldown_min", "冷却等待最小(秒)", kind="float", default=5.0, minimum=0.5, maximum=30.0, step=0.5, decimals=1),
@@ -78,7 +84,7 @@ class XKeywordWindow(SimpleToolWindow):
             "get_comments": values["get_comments"],
             "max_comments": int(values["max_comments"]),
         }
-        config = {k: v for k, v in values.items() if k in ("slice_days", "search_page_timeout", "cooldown_min", "cooldown_max", "no_new_scroll_limit", "max_scrolls")}
+        config = {k: v for k, v in values.items() if k in ("slice_days", "search_page_timeout", "cooldown_min", "cooldown_max", "no_new_scroll_limit", "max_scrolls", "max_parallel_tabs", "max_comment_tabs", "max_queue_size")}
         return run_x_spider(_lines(values["keywords"]), adv_params, debug_port_from_cdp_url(DEFAULT_X_CDP_URL), log_callback, finish_callback, stop_event, config=config, pause_event=pause_event)
 
 

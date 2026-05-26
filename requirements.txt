@@ -1,10 +1,7 @@
 google-api-python-client>=2.0.0
 langchain>=1.0.0
 langchain-openai>=0.3.0
-langgraph>=0.2.0
 openpyxl>=3.1.0
 PyQt5>=5.15.11
 playwright>=1.49.0
-protobuf>=4.25.8,<6.0.0
 python-dotenv>=1.0.0
-requests>=2.32.0,<3.0

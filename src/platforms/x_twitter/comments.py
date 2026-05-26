@@ -422,13 +422,12 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
             try:
                 own_status_id = article_own_status_id(article)
-                if target_status_id and (
-                    own_status_id == target_status_id
-                    or (not passed_main_section and article_contains_status_id(article, target_status_id))
-                ):
+                if target_status_id and own_status_id == target_status_id:
                     passed_main_section = True
                     continue
                 if not passed_main_section:
+                    if target_status_id and article_contains_status_id(article, target_status_id):
+                        continue
                     continue
                 if is_after_recommendation_boundary(article):
                     boundary_hit = True

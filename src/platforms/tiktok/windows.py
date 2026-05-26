@@ -41,6 +41,12 @@ class TikTokKeywordWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
+            ConfigParam("max_parallel_tabs", "关键词爬取并行tab数", kind="int", default=1, minimum=1, maximum=3,
+                        tooltip="同时处理几个关键词。1=顺序处理。最大3。"),
+            ConfigParam("max_comment_tabs", "评论爬取并行tab数", kind="int", default=1, minimum=1, maximum=3,
+                        tooltip="每个关键词同时用几个tab采集评论。1=顺序。最大3。"),
+            ConfigParam("max_queue_size", "评论队列最大长度", kind="int", default=5000, minimum=10, maximum=10000,
+                        tooltip="待爬评论链接的缓冲上限。满了则暂停采集新视频。"),
             ConfigParam("max_videos", "最多搜索结果数", kind="int", default=1000, minimum=1, maximum=5000),
             ConfigParam("max_candidates", "最多检查数", kind="int", default=3000, minimum=1, maximum=20000),
             ConfigParam("scroll_interval", "搜索滚动间隔(秒)", kind="float", default=0.7, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
@@ -52,7 +58,7 @@ class TikTokKeywordWindow(SimpleToolWindow):
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.tiktok.keyword import run_tiktok_spider
 
-        config = {k: v for k, v in values.items() if k.startswith("tiktok_") or k in ("max_videos", "max_candidates", "scroll_interval", "max_search_scrolls", "no_new_scroll_limit", "comment_top_limit")}
+        config = {k: v for k, v in values.items() if k.startswith("tiktok_") or k in ("max_videos", "max_candidates", "scroll_interval", "max_search_scrolls", "no_new_scroll_limit", "comment_top_limit", "max_parallel_tabs", "max_comment_tabs", "max_queue_size")}
         return run_tiktok_spider(
             _lines(values["keywords"]),
             int(values.get("max_videos", 1000)),

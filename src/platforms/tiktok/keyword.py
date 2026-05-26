@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import html as html_lib
 import json
+import queue
 import random
 import re
+import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from playwright.sync_api import sync_playwright
@@ -15,6 +18,7 @@ from src.core import (
     MultiSheetXlsxWriter,
     build_output_path,
     connect_existing_chromium,
+    ensure_chrome_for_cdp,
     expand_compact_number,
     extract_tiktok_video_title,
     interruptible_sleep,
@@ -37,7 +41,35 @@ CSV_FIELDS = [
     "发布时间",
     "视频链接",
     "博主主页链接",
+    "标签",
 ]
+
+def _tiktok_media_tag(item: dict, page=None) -> str:
+    """Classify TikTok post media type from JSON item data, with DOM fallback.
+    0=图片+视频, 1=图片, 2=视频, 3=纯文本, 4=其它
+    """
+    has_image = bool(item.get("image_post_info") or item.get("imagePost"))
+    has_video = bool(item.get("video") or item.get("videoInfo"))
+    if has_image and has_video:
+        return "0"
+    if has_image:
+        return "1"
+    if has_video:
+        return "2"
+    # JSON state empty or missing media keys — fall back to DOM
+    if page is not None:
+        try:
+            dom_has_image = page.locator('[data-e2e="browse-image-item"], [class*="DivPhoto"], swiper, [class*="Swiper"]').count() > 0
+            dom_has_video = page.locator("video, [data-e2e='video-player'], [class*='VideoPlayer']").count() > 0
+            if dom_has_image and dom_has_video:
+                return "0"
+            if dom_has_image:
+                return "1"
+            if dom_has_video:
+                return "2"
+        except Exception:
+            pass
+    return "3"
 
 DEFAULT_START_DATE = "2025-05-06"
 DEFAULT_END_DATE = "2026-05-06"
@@ -334,19 +366,20 @@ def collect_visible_video_items(page, seen_links: set[str]) -> list[dict[str, st
             seen_links.add(href)
     return items
 
-def open_search_page(page, keyword: str):
+def open_search_page(page, keyword: str, stop_event=None):
     search_url = f"https://www.tiktok.com/search/video?q={urllib.parse.quote(keyword)}"
     page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
-    time.sleep(random.uniform(1.8, 2.8))
+    interruptible_sleep(random.uniform(1.8, 2.8), stop_event)
 
-def extract_video_row(page, keyword: str, video_url: str, play_count: str = "") -> dict:
+def extract_video_row(page, keyword: str, video_url: str, play_count: str = "", stop_event=None) -> dict:
     page.goto(video_url, wait_until="domcontentloaded", timeout=25000)
     try:
         page.wait_for_selector("script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, [data-e2e='like-count']", timeout=3500)
     except Exception:
         pass
-    time.sleep(random.uniform(0.25, 0.55))
-    json_metrics = item_metrics(find_item_in_state(page_state_sources(page), extract_tiktok_video_id(video_url)))
+    interruptible_sleep(random.uniform(0.25, 0.55), stop_event)
+    item = find_item_in_state(page_state_sources(page), extract_tiktok_video_id(video_url))
+    json_metrics = item_metrics(item)
     publish_time = json_metrics.get("发布时间") or extract_publish_time(page)
     play_value = json_metrics.get("播放量") or play_count
     dom_like_value = extract_metric(page, "like-count", ["Likes", "Like", "赞", " "])
@@ -365,7 +398,228 @@ def extract_video_row(page, keyword: str, video_url: str, play_count: str = "") 
         "发布时间": publish_time,
         "视频链接": video_url,
         "博主主页链接": extract_author_url(video_url),
+        "标签": _tiktok_media_tag(item, page=page),
     }
+
+def _make_keyword_log_callback(base_log_callback, keyword: str):
+    """Wrap log_callback to prefix messages with [keyword] for disambiguation."""
+    def log(msg: str) -> None:
+        base_log_callback(f"[{keyword}] {msg}")
+    return log
+
+
+def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock,
+                             log_callback, stop_event, pause_event, comment_top_limit,
+                             consumers_ready=None):
+    """Consumer thread: creates its own Playwright connection and page, pops from queue."""
+    log = _make_keyword_log_callback(log_callback, keyword)
+    try:
+        with sync_playwright() as p:
+            _, context = connect_existing_chromium(p, cdp_port_or_url)
+            comments_page = context.new_page()
+            if consumers_ready is not None:
+                consumers_ready.set()
+            while True:
+                item = queue_obj.get()
+                if item is None:
+                    break
+                if should_stop(stop_event):
+                    break
+                if wait_if_paused(pause_event, stop_event):
+                    break
+                serial_number, video_url, max_scan = item
+                try:
+                    comments = collect_video_comments(
+                        comments_page, video_url, max_scan, log,
+                        stop_event, pause_event=pause_event,
+                        comment_top_limit=comment_top_limit,
+                    )
+                    with writer_lock:
+                        comment_count = 0
+                        for comment in comments:
+                            comment_row = {
+                                "序号": str(serial_number),
+                                "视频链接": video_url,
+                                "评论的点赞量": comment.get("like_count", ""),
+                                "评论内容": comment.get("text", ""),
+                                "发布时间": comment.get("create_time", ""),
+                            }
+                            writer.writerow("评论信息", sanitize_csv_row(comment_row))
+                            comment_count += 1
+                            if comment_count % 20 == 0:
+                                writer.save()
+                except Exception as exc:
+                    log(f"评论采集异常: {exc}")
+    except Exception as exc:
+        log(f"评论线程异常: {exc}")
+
+
+def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
+                                  max_videos, max_candidates, start_dt, end_dt,
+                                  get_comments_bool, max_comments, max_comment_tabs,
+                                  max_queue_size,
+                                  cdp_port_or_url, log_callback, stop_event, pause_event,
+                                  search_scroll_pause, config_max_search_scrolls,
+                                  no_new_scroll_limit, comment_top_limit, run_stamp):
+    """Scrape a single keyword in this thread. Spawns comment consumer threads if needed."""
+    log = _make_keyword_log_callback(log_callback, keyword)
+    output_path = None
+    writer = None
+    writer_lock = None
+    comment_queue = None
+    comment_threads: list[threading.Thread] = []
+    search_page = metrics_page = None
+    try:
+        if should_stop(stop_event):
+            log("任务已停止。")
+            return None
+        if wait_if_paused(pause_event, stop_event):
+            log("任务已停止。")
+            return None
+
+        log(f"[{keyword_index}/{total_keywords}] 搜索关键词：{keyword}")
+        output_path = build_output_path(
+            "tiktok", f"tiktok_keyword_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
+        )
+        log(f"  输出文件：{output_path}")
+        if start_dt is not None:
+            log(f"  日期范围：{start_dt.strftime('%Y-%m-%d')} 至 {end_dt.strftime('%Y-%m-%d')}")
+
+        with sync_playwright() as p:
+            _, context = connect_existing_chromium(p, cdp_port_or_url)
+            search_page = context.new_page()
+            metrics_page = context.new_page()
+
+            if get_comments_bool:
+                comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
+                writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=10)
+                writer_lock = threading.Lock()
+                comment_queue = queue.Queue(maxsize=max_queue_size)
+                consumers_ready = threading.Event()
+                for _ in range(max_comment_tabs):
+                    t = threading.Thread(
+                        target=_tiktok_comment_consumer,
+                        args=(keyword, comment_queue, cdp_port_or_url, writer, writer_lock,
+                              log_callback, stop_event, pause_event, comment_top_limit,
+                              consumers_ready),
+                        daemon=True,
+                    )
+                    t.start()
+                    comment_threads.append(t)
+            else:
+                writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=10)
+
+            serial_number = 1
+            open_search_page(search_page, keyword, stop_event=stop_event)
+            scroll_limit = dynamic_search_scroll_limit(max_videos, config_max_search_scrolls)
+            seen_links: set[str] = set()
+            scanned_count = 0
+            no_new_visible_rounds = 0
+            log("  开始边滚动边提取详情并按日期过滤")
+
+            written_count = 0
+            for scroll_index in range(scroll_limit):
+                if should_stop(stop_event):
+                    log("  已请求停止，结束当前关键词。")
+                    break
+                if wait_if_paused(pause_event, stop_event):
+                    break
+                new_items = collect_visible_video_items(search_page, seen_links)
+                if not new_items:
+                    no_new_visible_rounds += 1
+                else:
+                    no_new_visible_rounds = 0
+
+                for video_item in new_items:
+                    if should_stop(stop_event):
+                        break
+                    if wait_if_paused(pause_event, stop_event):
+                        break
+                    if written_count >= max_videos:
+                        break
+                    if scanned_count >= max_candidates:
+                        break
+                    scanned_count += 1
+                    try:
+                        video_url = video_item["视频链接"]
+                        log(f"  [候选{scanned_count}/已写{written_count}] {video_url}")
+                        row = extract_video_row(metrics_page, keyword, video_url, video_item.get("播放量", ""), stop_event=stop_event)
+
+                        if start_dt is not None:
+                            if not in_date_range(row["发布时间"], start_dt, end_dt):
+                                log(f"    跳过：发布时间不在范围内（{row['发布时间'] or '未解析'}）")
+                                continue
+
+                        row["序号"] = str(serial_number)
+
+                        if get_comments_bool:
+                            with writer_lock:
+                                writer.writerow("视频信息", sanitize_csv_row(row))
+                            if count_to_int(row.get("评论数", "0")) > 0:
+                                if consumers_ready.wait(timeout=0.5):
+                                    comment_queue.put((serial_number, video_url, max_comments))
+                                else:
+                                    log("    跳过评论采集：评论消费线程连接失败。")
+                        else:
+                            writer.writerow(sanitize_csv_row(row))
+
+                        serial_number += 1
+                        written_count += 1
+                    except Exception as exc:
+                        log(f"    跳过：{exc}")
+                    if scanned_count and scanned_count % 20 == 0:
+                        if random_cooldown(log, stop_event, 3.0, 8.0):
+                            break
+
+                if written_count >= max_videos:
+                    break
+                if scanned_count >= max_candidates:
+                    log(f"  已检查 {scanned_count} 个候选，达到候选检查上限，停止当前关键词。")
+                    break
+                if no_new_visible_rounds >= no_new_scroll_limit and scroll_index >= 20:
+                    log("  连续多轮没有新视频链接，停止当前关键词。")
+                    break
+                if scroll_index and scroll_index % 10 == 0:
+                    log(f"  已滚动 {scroll_index}/{scroll_limit} 轮，已扫描 {scanned_count} 个候选，写入 {written_count} 条")
+
+                trigger_search_lazy_load(search_page)
+                interruptible_sleep(search_scroll_pause, stop_event)
+
+            log(f"  写入 {written_count} 条日期范围内的视频")
+            if comment_threads and comment_queue is not None:
+                for _ in comment_threads:
+                    comment_queue.put(None)
+                for t in comment_threads:
+                    t.join(timeout=120)
+
+            writer.save()
+            return output_path
+
+    except Exception as exc:
+        log(f"运行失败：{exc}")
+        if writer is not None:
+            try:
+                writer.save()
+            except Exception:
+                pass
+        return None
+    finally:
+        if comment_threads and comment_queue is not None:
+            try:
+                for _ in comment_threads:
+                    comment_queue.put(None)
+            except Exception:
+                pass
+            for t in comment_threads:
+                if t.is_alive():
+                    t.join(timeout=10)
+        for pg in (search_page, metrics_page):
+            if pg is not None and not pg.is_closed():
+                try:
+                    pg.close()
+                except Exception:
+                    pass
+
 
 def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str, start_date, end_date, get_comments_str, max_comments, cdp_port_or_url, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
     if config is None:
@@ -374,8 +628,10 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
     config_max_search_scrolls = int(config.get("max_search_scrolls", MAX_SEARCH_SCROLLS))
     no_new_scroll_limit = int(config.get("no_new_scroll_limit", 12))
     comment_top_limit = int(config.get("comment_top_limit", 100))
+    max_parallel_tabs = max(1, min(3, int(config.get("max_parallel_tabs", 1))))
+    max_comment_tabs = max(1, min(3, int(config.get("max_comment_tabs", 1))))
+    max_queue_size = max(10, min(10000, int(config.get("max_queue_size", 5000))))
 
-    output_path = None
     output_paths: list[str] = []
     try:
         limit_time_bool = limit_time_str == "是"
@@ -383,133 +639,78 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
         start_dt, end_dt = None, None
         if limit_time_bool:
             start_dt, end_dt = parse_date_range(start_date, end_date)
-        
-        with sync_playwright() as p:
-            log_callback("正在连接本地 Chrome...")
-            try:
-                _, context = connect_existing_chromium(p, cdp_port_or_url)
-            except Exception as exc:
-                log_callback(f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
-                return
 
-            search_page = context.new_page()
-            detail_page = context.new_page()
+        run_stamp = time.strftime("%Y%m%d_%H%M%S")
 
-            run_stamp = time.strftime("%Y%m%d_%H%M%S")
-            for index, keyword in enumerate(keywords_list, 1):
+        # pre-launch Chrome once before fanning out to threads
+        ensure_chrome_for_cdp(cdp_port_or_url, log_callback=log_callback)
+
+        # --- sequential path (1 keyword or max_parallel_tabs == 1) ---
+        if max_parallel_tabs <= 1 or len(keywords_list) <= 1:
+            for idx, keyword in enumerate(keywords_list, 1):
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
-                output_path = build_output_path(
-                    "tiktok",
-                    f"tiktok_keyword_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
+                path = _scrape_single_tiktok_keyword(
+                    keyword, idx, len(keywords_list),
+                    max_videos, max_candidates,
+                    start_dt, end_dt,
+                    get_comments_bool, max_comments, max_comment_tabs,
+                    max_queue_size,
+                    cdp_port_or_url,
+                    log_callback, stop_event, pause_event,
+                    search_scroll_pause, config_max_search_scrolls,
+                    no_new_scroll_limit, comment_top_limit,
+                    run_stamp,
                 )
-                output_paths.append(output_path)
-                log_callback(f"[{index}/{len(keywords_list)}] 搜索关键词：{keyword}")
-                log_callback(f"  输出文件：{output_path}")
-                if limit_time_bool:
-                    log_callback(f"  日期范围：{start_date} 至 {end_date}")
+                if path:
+                    output_paths.append(path)
 
-                if get_comments_bool:
-                    comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
-                    writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields})
-                else:
-                    writer = XlsxRowWriter(output_path, CSV_FIELDS)
-                    
-                serial_number = 1
+            log_callback("完成，已按关键词分别保存：")
+            for p in output_paths:
+                log_callback(f"  {p}")
+            finish_callback(output_paths[-1] if output_paths else None)
+            return
 
-                open_search_page(search_page, keyword)
-                scroll_limit = dynamic_search_scroll_limit(max_videos, config_max_search_scrolls)
-                seen_links: set[str] = set()
-                scanned_count = 0
-                no_new_visible_rounds = 0
-                log_callback("  开始边滚动边提取详情并按日期过滤")
+        # --- parallel path ---
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            future_to_keyword = {}
+            for idx, keyword in enumerate(keywords_list, 1):
+                if should_stop(stop_event):
+                    break
+                if wait_if_paused(pause_event, stop_event):
+                    break
+                future = executor.submit(
+                    _scrape_single_tiktok_keyword,
+                    keyword, idx, len(keywords_list),
+                    max_videos, max_candidates,
+                    start_dt, end_dt,
+                    get_comments_bool, max_comments, max_comment_tabs,
+                    max_queue_size,
+                    cdp_port_or_url,
+                    log_callback, stop_event, pause_event,
+                    search_scroll_pause, config_max_search_scrolls,
+                    no_new_scroll_limit, comment_top_limit,
+                    run_stamp,
+                )
+                future_to_keyword[future] = keyword
 
-                written_count = 0
-                for scroll_index in range(scroll_limit):
-                    if should_stop(stop_event):
-                        log_callback("  已请求停止，结束当前关键词。")
-                        break
-                    if wait_if_paused(pause_event, stop_event):
-                        break
-                    new_items = collect_visible_video_items(search_page, seen_links)
-                    if not new_items:
-                        no_new_visible_rounds += 1
-                    else:
-                        no_new_visible_rounds = 0
+            for future in as_completed(future_to_keyword):
+                keyword = future_to_keyword[future]
+                try:
+                    path = future.result()
+                    if path:
+                        output_paths.append(path)
+                except Exception as exc:
+                    log_callback(f"[{keyword}] 线程异常: {exc}")
 
-                    for video_item in new_items:
-                        if should_stop(stop_event):
-                            break
-                        if wait_if_paused(pause_event, stop_event):
-                            break
-                        if written_count >= max_videos:
-                            break
-                        if scanned_count >= max_candidates:
-                            break
-                        scanned_count += 1
-                        try:
-                            video_url = video_item["视频链接"]
-                            log_callback(f"  [候选{scanned_count}/已写{written_count}] {video_url}")
-                            row = extract_video_row(detail_page, keyword, video_url, video_item.get("播放量", ""))
-                            
-                            if limit_time_bool:
-                                if not in_date_range(row["发布时间"], start_dt, end_dt):
-                                    log_callback(f"    跳过：发布时间不在范围内（{row['发布时间'] or '未解析'}）")
-                                    continue
-                                    
-                            row["序号"] = str(serial_number)
-                            
-                            if get_comments_bool:
-                                comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event, pause_event=pause_event, comment_top_limit=comment_top_limit)
-                                writer.writerow("视频信息", sanitize_csv_row(row))
-                                for comment in comments:
-                                    comment_row = {
-                                        "序号": str(serial_number),
-                                        "视频链接": video_url,
-                                        "评论的点赞量": comment.get("like_count", ""),
-                                        "评论内容": comment.get("text", ""),
-                                        "发布时间": comment.get("create_time", "")
-                                    }
-                                    writer.writerow("评论信息", sanitize_csv_row(comment_row))
-                            else:
-                                writer.writerow(sanitize_csv_row(row))
-                                
-                            serial_number += 1
-                            written_count += 1
-                        except Exception as exc:
-                            log_callback(f"    跳过：{exc}")
-                        if scanned_count and scanned_count % 20 == 0:
-                            if random_cooldown(log_callback, stop_event, 3.0, 8.0):
-                                break
+        log_callback(f"全部关键词处理完毕。{len(output_paths)}/{len(keywords_list)} 个成功。")
+        for p in output_paths:
+            log_callback(f"  {p}")
+        finish_callback(output_paths[-1] if output_paths else None)
 
-                    if written_count >= max_videos:
-                        break
-                    if scanned_count >= max_candidates:
-                        log_callback(f"  已检查 {scanned_count} 个候选，达到候选检查上限，停止当前关键词。")
-                        break
-                    if no_new_visible_rounds >= no_new_scroll_limit and scroll_index >= 20:
-                        log_callback("  连续多轮没有新视频链接，停止当前关键词。")
-                        break
-                    if scroll_index and scroll_index % 10 == 0:
-                        log_callback(f"  已滚动 {scroll_index}/{scroll_limit} 轮，已扫描 {scanned_count} 个候选，写入 {written_count} 条")
-
-                    trigger_search_lazy_load(search_page)
-                    interruptible_sleep(search_scroll_pause, stop_event)
-                log_callback(f"  写入 {written_count} 条日期范围内的视频")
-                writer.save()
-
-            for opened_page in (search_page, detail_page):
-                if not opened_page.is_closed():
-                    opened_page.close()
-
-        log_callback("完成，已按关键词分别保存：")
-        for path in output_paths:
-            log_callback(f"  {path}")
     except Exception as exc:
         log_callback(f"运行失败：{exc}")
-        output_path = None
-    finally:
-        finish_callback(output_paths[-1] if output_paths else output_path)
+        finish_callback(None)
