@@ -14,6 +14,8 @@ def _lines(value: str) -> list[str]:
 
 
 class TikTokKeywordWindow(SimpleToolWindow):
+    tool_id = "tiktok_keyword_metrics"
+
     def __init__(self) -> None:
         super().__init__(
             "TikTok 关键词搜索",
@@ -70,6 +72,8 @@ class TikTokKeywordWindow(SimpleToolWindow):
 
 
 class TikTokProfilesWindow(SimpleToolWindow):
+    tool_id = "tiktok_profile_directory"
+
     def __init__(self) -> None:
         super().__init__(
             "TikTok 博主信息",
@@ -90,6 +94,8 @@ class TikTokProfilesWindow(SimpleToolWindow):
 
 
 class TikTokProfileVideosWindow(SimpleToolWindow):
+    tool_id = "tiktok_profile_videos"
+
     def __init__(self) -> None:
         super().__init__(
             "TikTok 博主视频采集",
@@ -149,6 +155,8 @@ class TikTokProfileVideosWindow(SimpleToolWindow):
 
 
 class TikTokProfilePlayCountsWindow(SimpleToolWindow):
+    tool_id = "tiktok_profile_play_counts"
+
     def __init__(self) -> None:
         super().__init__(
             "TikTok 博主视频播放量",
@@ -182,6 +190,8 @@ class TikTokProfilePlayCountsWindow(SimpleToolWindow):
 
 
 class TikTokContextWindow(SimpleToolWindow):
+    tool_id = "tiktok_paired_context_metrics"
+
     def __init__(self) -> None:
         super().__init__(
             "TikTok 视频上下文数据",
@@ -205,6 +215,8 @@ class TikTokContextWindow(SimpleToolWindow):
 
 
 class TikTokCommentsWindow(SimpleToolWindow):
+    tool_id = "tiktok_top_comments"
+
     def __init__(self) -> None:
         super().__init__(
             "TikTok 热门评论",

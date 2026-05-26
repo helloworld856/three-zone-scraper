@@ -14,6 +14,8 @@ def _lines(value: str) -> list[str]:
 
 
 class XKeywordWindow(SimpleToolWindow):
+    tool_id = "x_keyword_video_search"
+
     def tool_config_params(self):
         return [
             ConfigParam("slice_days", "时间切片跨度(天)", kind="int", default=7, minimum=1, maximum=365),
@@ -81,6 +83,8 @@ class XKeywordWindow(SimpleToolWindow):
 
 
 class XProfilesWindow(SimpleToolWindow):
+    tool_id = "x_tweet_author_profiles"
+
     def tool_config_params(self):
         return [
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
@@ -119,6 +123,8 @@ class XProfilesWindow(SimpleToolWindow):
 
 
 class XContextWindow(SimpleToolWindow):
+    tool_id = "x_paired_context_metrics"
+
     def tool_config_params(self):
         return [
             ConfigParam("context_size", "目标推文前后各取几条", kind="int", default=5, minimum=1, maximum=20),
@@ -141,6 +147,8 @@ class XContextWindow(SimpleToolWindow):
 
 
 class XTweetMetricsWindow(SimpleToolWindow):
+    tool_id = "x_tweet_metrics"
+
     def tool_config_params(self):
         return [
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=30000, minimum=10000, maximum=120000, step=1000),
@@ -166,6 +174,8 @@ class XTweetMetricsWindow(SimpleToolWindow):
 
 
 class XProfileTweetsWindow(SimpleToolWindow):
+    tool_id = "x_profile_tweets"
+
     def tool_config_params(self):
         return [
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=30000, minimum=10000, maximum=120000, step=1000),
@@ -225,6 +235,8 @@ class XProfileTweetsWindow(SimpleToolWindow):
 
 
 class XCommentsWindow(SimpleToolWindow):
+    tool_id = "x_top_comments"
+
     def tool_config_params(self):
         return [
             ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),

@@ -11,7 +11,9 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -41,14 +43,24 @@ class ConfigDialog(QDialog):
         params: list[ConfigParam],
         current_values: dict[str, Any] | None = None,
         parent: QWidget | None = None,
+        tool_id: str = "",
+        current_profile: str | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"{title} — 参数配置")
-        self.resize(560, 420)
+        self.resize(580, 460)
         self.params = params
+        self.tool_id = tool_id
+        self._profile = current_profile
+        self._defaults = {p.key: p.default for p in params}
         self._current = dict(current_values or {})
         self._widgets: dict[str, Any] = {}
+        self._profile_combo: QComboBox | None = None
+        self._delete_btn: QPushButton | None = None
         self._build_ui()
+        if self._profile:
+            from src.core.config_store import load_config
+            self._current = load_config(self.tool_id, self._defaults, self._profile)
         self._apply_current_or_defaults()
 
     def _build_ui(self) -> None:
@@ -56,10 +68,27 @@ class ConfigDialog(QDialog):
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(10)
 
-        header = QLabel("调整爬取行为参数。留空或关闭窗口将使用默认值。")
+        header = QLabel("调整爬取行为参数。可选择已保存的配置方案，或另存为新方案。")
         header.setWordWrap(True)
         header.setStyleSheet("color: #667085; font-size: 9pt;")
         root.addWidget(header)
+
+        if self.tool_id:
+            profile_row = QHBoxLayout()
+            profile_row.setSpacing(8)
+            profile_row.addWidget(QLabel("配置方案："))
+            self._profile_combo = QComboBox()
+            self._profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+            self._refresh_profile_list()
+            profile_row.addWidget(self._profile_combo, 1)
+            save_as_btn = QPushButton("另存为…")
+            save_as_btn.clicked.connect(self._on_save_as)
+            profile_row.addWidget(save_as_btn)
+            self._delete_btn = QPushButton("删除")
+            self._delete_btn.clicked.connect(self._on_delete_profile)
+            self._delete_btn.setEnabled(self._profile is not None)
+            profile_row.addWidget(self._delete_btn)
+            root.addLayout(profile_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -88,7 +117,7 @@ class ConfigDialog(QDialog):
         buttons.addStretch(1)
         save_btn = QPushButton("保存")
         save_btn.setObjectName("primaryButton")
-        save_btn.clicked.connect(self.accept)
+        save_btn.clicked.connect(self._on_save)
         buttons.addWidget(save_btn)
         cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
@@ -182,6 +211,12 @@ class ConfigDialog(QDialog):
             elif param.kind == "bool":
                 widget.setChecked(bool(value))
 
+    def _on_save(self) -> None:
+        for widget in self._widgets.values():
+            if hasattr(widget, "interpretText"):
+                widget.interpretText()
+        self.accept()
+
     def _apply_defaults(self) -> None:
         for param in self.params:
             widget = self._widgets.get(param.key)
@@ -202,6 +237,8 @@ class ConfigDialog(QDialog):
             widget = self._widgets.get(param.key)
             if widget is None:
                 continue
+            if param.kind in ("int", "float"):
+                widget.interpretText()
             if param.kind == "int":
                 result[param.key] = widget.value()
             elif param.kind == "float":
@@ -211,3 +248,67 @@ class ConfigDialog(QDialog):
             elif param.kind == "bool":
                 result[param.key] = widget.isChecked()
         return result
+
+    def get_selected_profile(self) -> str | None:
+        """返回用户最终选择的方案名，None 表示默认方案。"""
+        return self._profile
+
+    def _refresh_profile_list(self) -> None:
+        if self._profile_combo is None:
+            return
+        from src.core.config_store import list_profiles
+
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.clear()
+        profiles = list_profiles(self.tool_id)
+        for display_name, profile_key in profiles:
+            self._profile_combo.addItem(display_name, profile_key)
+        idx = self._profile_combo.findData(self._profile)
+        if idx >= 0:
+            self._profile_combo.setCurrentIndex(idx)
+        self._profile_combo.blockSignals(False)
+
+    def _on_profile_changed(self, _index: int) -> None:
+        if self._profile_combo is None:
+            return
+        self._profile = self._profile_combo.currentData()
+        if self._delete_btn is not None:
+            self._delete_btn.setEnabled(self._profile is not None)
+        from src.core.config_store import load_config
+
+        values = load_config(self.tool_id, self._defaults, self._profile)
+        self._current = values
+        self._apply_current_or_defaults()
+
+    def _on_delete_profile(self) -> None:
+        if self._profile is None:
+            return
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除配置方案「{self._profile}」吗？此操作不可撤销。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        from src.core.config_store import delete_profile
+
+        delete_profile(self.tool_id, self._profile)
+        self._profile = None
+        self._refresh_profile_list()
+        from src.core.config_store import load_config
+
+        self._current = load_config(self.tool_id, self._defaults, None)
+        self._apply_current_or_defaults()
+
+    def _on_save_as(self) -> None:
+        name, ok = QInputDialog.getText(self, "另存为新方案", "请输入新方案名称：")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        from src.core.config_store import save_config
+
+        values = self.get_values()
+        save_config(self.tool_id, values, self._defaults, name)
+        self._profile = name
+        self._refresh_profile_list()
+        self.accept()

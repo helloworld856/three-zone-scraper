@@ -9,7 +9,7 @@ from typing import Any
 
 from src.core.app_logging import get_logger
 
-from PyQt5.QtCore import QObject, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -47,6 +47,9 @@ class WorkerSignals(QObject):
 
 
 class SimpleToolWindow(QWidget):
+    tool_id: str = ""
+    current_profile: str | None = None
+
     def __init__(self, title: str, fields: list[FieldSpec], *, width: int = 720, height: int = 680) -> None:
         super().__init__()
         self.setWindowTitle(title)
@@ -64,6 +67,7 @@ class SimpleToolWindow(QWidget):
         self.form_layout: QFormLayout | None = None
         self.config_values: dict[str, Any] = {}
         self._build_ui()
+        self._load_persisted_config()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -165,6 +169,7 @@ class SimpleToolWindow(QWidget):
             vbox.setContentsMargins(0, 0, 0, 0)
             vbox.setSpacing(4)
             mode_combo = QComboBox()
+            mode_combo.installEventFilter(self)
             mode_combo.addItems(["直接输入", "TXT 文件"])
             vbox.addWidget(mode_combo)
             text_edit = QPlainTextEdit()
@@ -190,6 +195,8 @@ class SimpleToolWindow(QWidget):
             widget = QLineEdit(str(field.default or ""))
             widget.setPlaceholderText(field.placeholder)
         self.widgets[field.name] = widget
+        if isinstance(widget, (QSpinBox, QComboBox)):
+            widget.installEventFilter(self)
         return widget
 
     def _select_path(self, field: FieldSpec, edit: QLineEdit) -> None:
@@ -216,6 +223,7 @@ class SimpleToolWindow(QWidget):
             if field.kind == "multiline":
                 value = widget.toPlainText().strip()
             elif field.kind == "int":
+                widget.interpretText()
                 value = widget.value()
             elif field.kind == "combo":
                 value = widget.currentText().strip()
@@ -324,16 +332,31 @@ class SimpleToolWindow(QWidget):
     def tool_config_params(self) -> list[Any]:
         return []
 
+    def _load_persisted_config(self) -> None:
+        from src.core.config_store import load_config
+
+        defaults = {p.key: p.default for p in self.tool_config_params()}
+        if self.tool_id and defaults:
+            self.config_values = load_config(self.tool_id, defaults, self.current_profile)
+
     def _open_config(self) -> None:
         from src.ui.config_dialog import ConfigDialog
+        from src.core.config_store import save_config
 
         params = self.tool_config_params()
         if not params:
             QMessageBox.information(self, "提示", "此工具没有可配置的参数。")
             return
-        dialog = ConfigDialog(self.windowTitle(), params, self.config_values, self)
+        dialog = ConfigDialog(
+            self.windowTitle(), params, self.config_values, self,
+            tool_id=self.tool_id, current_profile=self.current_profile,
+        )
         if dialog.exec_() == ConfigDialog.Accepted:
             self.config_values = dialog.get_values()
+            self.current_profile = dialog.get_selected_profile()
+            if self.tool_id:
+                defaults = {p.key: p.default for p in params}
+                save_config(self.tool_id, self.config_values, defaults, self.current_profile)
 
     def run_task(self, values: dict[str, Any], log_callback, finish_callback, stop_event, pause_event) -> Any:
         raise NotImplementedError
@@ -391,6 +414,11 @@ class SimpleToolWindow(QWidget):
         self._set_state("idle")
         self.append_log(f"运行失败：{message}")
         QMessageBox.critical(self, "运行失败", message)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Wheel:
+            return True
+        return super().eventFilter(obj, event)
 
     def closeEvent(self, event) -> None:
         if self.worker_thread and self.worker_thread.is_alive():

@@ -10,6 +10,8 @@ from src.ui.config_dialog import ConfigParam
 
 
 class JudgeAIGCWindow(SimpleToolWindow):
+    tool_id = "judge_aigc"
+
     def __init__(self) -> None:
         super().__init__(
             "AIGC 内容判断",

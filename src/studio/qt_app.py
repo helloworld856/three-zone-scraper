@@ -404,6 +404,11 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
 def main() -> None:
     setup_console_logging()
+    from src.core.config_store import generate_all_defaults
+    try:
+        generate_all_defaults()
+    except OSError:
+        pass
     logger.info("Starting main window")
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("多平台数据爬取工具")

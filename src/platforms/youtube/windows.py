@@ -13,6 +13,8 @@ def _lines(value: str) -> list[str]:
 
 
 class YouTubeKeywordWindow(SimpleToolWindow):
+    tool_id = "youtube_keyword_mining"
+
     def __init__(self) -> None:
         super().__init__(
             "YouTube 关键词搜索",
@@ -84,6 +86,8 @@ class YouTubeProfilesWindow(SimpleToolWindow):
 
 
 class YouTubeContextWindow(SimpleToolWindow):
+    tool_id = "youtube_paired_context_metrics"
+
     def __init__(self) -> None:
         super().__init__(
             "YouTube 视频上下文数据",
@@ -107,6 +111,8 @@ class YouTubeContextWindow(SimpleToolWindow):
 
 
 class YouTubeChannelWorksWindow(SimpleToolWindow):
+    tool_id = "youtube_channel_works"
+
     def __init__(self) -> None:
         super().__init__(
             "YouTube 博主作品采集",
@@ -171,6 +177,8 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
 
 
 class YouTubeCommentsWindow(SimpleToolWindow):
+    tool_id = "youtube_top_comments"
+
     def __init__(self) -> None:
         super().__init__(
             "YouTube 热门评论",

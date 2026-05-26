@@ -10,6 +10,8 @@ def _lines(value: str) -> list[str]:
 
 
 class InstagramProfileWorksWindow(SimpleToolWindow):
+    tool_id = "instagram_profile_works"
+
     def __init__(self) -> None:
         super().__init__(
             "Instagram 博主作品采集",
