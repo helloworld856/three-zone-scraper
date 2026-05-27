@@ -46,7 +46,11 @@ DEEPSEEK_MODEL_NAME=deepseek-chat
 
 - `main.py`：桌面工具台入口。
 - `requirements.txt`：运行依赖。
-- `src/studio/`：PyQt 主工具台、工具注册表、独立工具进程启动器。
+- `src/studio/`：PyQt 主工具台、组件发现、独立工具进程启动器。
+  - `discovery.py`：动态扫描 `manifest.json` 发现工具组件。
+  - `registry.py`：工具注册表（调用 discovery 动态生成）。
+  - `qt_app.py`：主窗口，支持热重载工具。
+  - `tool_runner.py`：独立进程启动器。
 - `src/ui/`：工具窗口公共基类。
 - `src/core/`：输出路径、XLSX 写入、数字转换、文本清洗、Chrome CDP、等待机制等公共能力。
 - `src/platforms/youtube/`：YouTube 采集工具。
@@ -59,6 +63,46 @@ DEEPSEEK_MODEL_NAME=deepseek-chat
 - `test/`：UI 逻辑测试和暂停功能测试。
 - `user_data/`：各平台浏览器登录态目录。
 - `output/`：默认输出目录，按平台分目录存放。`output/temp/` 存放文本输入中转文件的临时目录。
+
+## 组件化架构
+
+工具采用组件化架构，每个工具由两个文件组成：
+
+- **实现文件**：如 `keyword.py`，包含爬虫逻辑。
+- **manifest 文件**：如 `keyword.manifest.json`，描述工具元数据（名称、分类、标签等）。
+
+manifest 文件格式：
+
+```json
+{
+  "tool_id": "youtube_keyword_mining",
+  "name": "YouTube 关键词搜索",
+  "category": "YouTube",
+  "summary": "按关键词和日期范围搜索...",
+  "entrypoint": "src.platforms.youtube.windows.YouTubeKeywordWindow",
+  "implementation_path": "platforms/youtube/keyword.py",
+  "tags": ["YouTube", "search", "keyword"]
+}
+```
+
+### 热重载
+
+主窗口提供「重载工具」按钮，用于：
+
+- **新增工具**：创建 manifest 和实现文件后，点击重载即可发现新工具。
+- **修改元数据**：更新 manifest 中的名称、描述等，点击重载刷新工具列表。
+- **修改代码**：工具作为独立子进程运行，每次启动自动加载最新代码，无需重载。
+
+工具进程隔离：每个工具在独立进程中运行，单个工具崩溃不影响主窗口和其他工具。
+
+### 添加新工具
+
+在已有平台下添加（以 YouTube 为例）：
+
+1. 创建实现文件：`src/platforms/youtube/new_tool.py`
+2. 在 `windows.py` 中添加窗口类
+3. 创建 manifest：`src/platforms/youtube/new_tool.manifest.json`
+4. 点击主窗口「重载工具」
 
 ## 通用输入规则
 

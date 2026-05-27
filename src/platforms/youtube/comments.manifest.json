@@ -1,0 +1,9 @@
+{
+  "tool_id": "youtube_top_comments",
+  "name": "YouTube 热门评论",
+  "category": "YouTube",
+  "summary": "读取每行一个视频链接的 TXT，导出每个视频点赞量最高的前 100 条主楼评论。",
+  "entrypoint": "src.platforms.youtube.windows.YouTubeCommentsWindow",
+  "implementation_path": "platforms/youtube/comments.py",
+  "tags": ["YouTube", "comments", "top", "txt"]
+}

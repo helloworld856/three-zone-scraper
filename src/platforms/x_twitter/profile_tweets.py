@@ -590,6 +590,7 @@ def run_x_profile_tweets_spider(
         log_line(log_callback, f"完成，已保存：{output_path}")
     finally:
         try:
+
             if page and not page.is_closed():
                 page.close()
         except Exception:
