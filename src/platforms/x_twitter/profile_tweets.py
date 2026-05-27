@@ -314,6 +314,7 @@ def collect_profile_tweets(
     cooldown_min=None,
     cooldown_max=None,
     pause_event=None,
+    keyword: str | None = None,
 ) -> list[dict[str, str]] | tuple[list[dict[str, str]], int, int]:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
@@ -332,7 +333,14 @@ def collect_profile_tweets(
     if not username:
         raise ValueError(f"无效的 X 博主主页链接：{profile_url}")
 
-    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_timeout)
+    if keyword:
+        import urllib.parse
+        search_query = f"from:{username} {keyword}"
+        target_url = f"https://x.com/search?q={urllib.parse.quote(search_query)}&src=typed_query&f=live"
+    else:
+        target_url = clean_profile_url(profile_url)
+
+    page.goto(target_url, wait_until="domcontentloaded", timeout=page_timeout)
     page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
     interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
 
@@ -448,6 +456,8 @@ def build_rows(tweets: list[dict[str, str]]) -> list[dict[str, str]]:
 
 def run_x_profile_tweets_spider(
     profile_urls_text: str,
+    use_keywords_str: str,
+    keywords_text: str,
     limit_time_str: str,
     start_date: str,
     end_date: str,
@@ -512,43 +522,64 @@ def run_x_profile_tweets_spider(
             page = context.new_page()
             detail_page = context.new_page() if get_comments_bool else None
 
-            for profile_index, profile_url in enumerate(profile_urls, 1):
+            use_keywords_bool = use_keywords_str == "是"
+            keyword_list = [None]
+            if use_keywords_bool:
+                parsed_kws = [k.strip() for k in keywords_text.splitlines() if k.strip()]
+                if parsed_kws:
+                    keyword_list = parsed_kws
+                else:
+                    log_line(log_callback, "启用了关键词搜索但未提供关键词，将按无关键词采集。")
+
+            total_tasks = len(profile_urls) * len(keyword_list)
+            task_index = 0
+
+            for profile_url in profile_urls:
                 if should_stop(stop_event):
                     log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
 
-                username = extract_profile_username(profile_url)
-                log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取主页：{profile_url}")
-                try:
-                    _, row_offset, written_count = collect_profile_tweets(
-                        page,
-                        detail_page,
-                        profile_url,
-                        max_scrolls,
-                        limit_time_bool,
-                        start_dt,
-                        end_dt,
-                        get_comments_bool,
-                        max_comments_val,
-                        log_callback,
-                        stop_event,
-                        writer=writer,
-                        row_offset=row_offset,
-                        page_timeout=page_load_timeout_val,
-                        scroll_delay=scroll_delay_val,
-                        no_new_scroll_limit=no_new_scroll_limit_val,
-                        save_batch_size=save_batch_size_val,
-                        cooldown_min=cooldown_min_val,
-                        cooldown_max=cooldown_max_val,
-                        pause_event=pause_event,
-                    )
-                    log_line(log_callback, f"  完成 @{username}：写入 {written_count} 条帖子。")
-                except PlaywrightTimeoutError:
-                    log_line(log_callback, "  跳过：页面加载超时，请确认链接可打开且账号已登录。")
-                except Exception as exc:
-                    log_line(log_callback, f"  跳过：{exc}")
+                for kw in keyword_list:
+                    if should_stop(stop_event):
+                        break
+                    if wait_if_paused(pause_event, stop_event):
+                        break
+
+                    task_index += 1
+                    username = extract_profile_username(profile_url)
+                    kw_info = f" (关键词: {kw})" if kw else ""
+                    log_line(log_callback, f"[{task_index}/{total_tasks}] 读取主页：{profile_url}{kw_info}")
+                    try:
+                        _, row_offset, written_count = collect_profile_tweets(
+                            page,
+                            detail_page,
+                            profile_url,
+                            max_scrolls,
+                            limit_time_bool,
+                            start_dt,
+                            end_dt,
+                            get_comments_bool,
+                            max_comments_val,
+                            log_callback,
+                            stop_event,
+                            writer=writer,
+                            row_offset=row_offset,
+                            page_timeout=page_load_timeout_val,
+                            scroll_delay=scroll_delay_val,
+                            no_new_scroll_limit=no_new_scroll_limit_val,
+                            save_batch_size=save_batch_size_val,
+                            cooldown_min=cooldown_min_val,
+                            cooldown_max=cooldown_max_val,
+                            pause_event=pause_event,
+                            keyword=kw,
+                        )
+                        log_line(log_callback, f"  完成 @{username}{kw_info}：写入 {written_count} 条帖子。")
+                    except PlaywrightTimeoutError:
+                        log_line(log_callback, "  跳过：页面加载超时，请确认链接可打开且账号已登录。")
+                    except Exception as exc:
+                        log_line(log_callback, f"  跳过：{exc}")
 
             for opened_page in (page, detail_page):
                 if opened_page is not None and not opened_page.is_closed():
