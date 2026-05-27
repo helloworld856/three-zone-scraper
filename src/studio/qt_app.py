@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
 )
 
 from src.core.app_logging import get_logger, setup_console_logging
+from src.studio.discovery import discover_tools
 from src.studio.registry import TOOLS
 
 logger = get_logger(__name__)
@@ -78,6 +79,11 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         refresh_btn = QPushButton("刷新")
         refresh_btn.clicked.connect(self.refresh_tools)
         header.addWidget(refresh_btn)
+
+        reload_btn = QPushButton("重载工具")
+        reload_btn.setToolTip("重新扫描组件目录，加载新增或修改的工具")
+        reload_btn.clicked.connect(self.reload_tools)
+        header.addWidget(reload_btn)
         root_layout.addLayout(header)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -280,6 +286,22 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
     def _on_category_changed(self, current: QListWidgetItem | None) -> None:
         self.current_category = current.data(Qt.UserRole) if current else ALL_CATEGORY
         self.refresh_tools()
+
+    def reload_tools(self) -> None:
+        logger.info("Reloading tools from manifests")
+        self.tools = discover_tools()
+        extra_categories = sorted({tool.category for tool in self.tools} - set(CATEGORY_ORDER))
+        self.category_order = [*CATEGORY_ORDER, *extra_categories]
+
+        self.nav.clear()
+        for category in self.category_order:
+            item = QListWidgetItem(self._category_label(category))
+            item.setData(Qt.UserRole, category)
+            self.nav.addItem(item)
+        self.nav.setCurrentRow(0)
+
+        self.refresh_tools()
+        logger.info("Reloaded %d tools", len(self.tools))
 
     def refresh_tools(self) -> None:
         query = self.search_entry.text().strip().lower()
