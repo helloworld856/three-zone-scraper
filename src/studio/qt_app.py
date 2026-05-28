@@ -28,7 +28,6 @@ from PyQt5.QtWidgets import (
 
 from src.core.app_logging import get_logger, setup_console_logging
 from src.studio.discovery import SCAN_DIRS, discover_tools
-from src.studio.registry import TOOLS
 
 logger = get_logger(__name__)
 
@@ -44,7 +43,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.resize(1040, 640)
         self.setMinimumSize(860, 560)
 
-        self.tools = list(TOOLS)
+        self.tools, _ = discover_tools()
         extra_categories = sorted({tool.category for tool in self.tools} - set(CATEGORY_ORDER))
         self.category_order = [*CATEGORY_ORDER, *extra_categories]
         self.filtered_tools = []

@@ -168,6 +168,26 @@ def test_reload_tools():
 
     print("[PASS] 重新加载验证通过")
 
+def test_find_tool_covers_all_discovered():
+    """测试 tool_runner.find_tool 能找到所有 discover_tools 发现的工具"""
+    from src.studio.tool_runner import find_tool
+
+    tools, _ = discover_tools()
+    project_root = Path(__file__).resolve().parents[1]
+
+    for tool in tools:
+        # find_tool 必须能找到每个已发现的工具
+        found = find_tool(tool.tool_id)
+        assert found is not None, f"find_tool 找不到 '{tool.tool_id}'"
+        assert found.tool_id == tool.tool_id, f"find_tool('{tool.tool_id}') 返回了错误的工具 '{found.tool_id}'"
+
+        # implementation_path 对应的文件必须存在
+        if tool.implementation_path:
+            script_path = project_root / "src" / tool.implementation_path
+            assert script_path.exists(), f"工具 '{tool.tool_id}' 的实现文件不存在: {script_path}"
+
+    print(f"[PASS] find_tool 覆盖全部 {len(tools)} 个工具，实现文件均存在")
+
 def run_all_tests():
     """运行所有测试"""
     print("=" * 60)
@@ -183,6 +203,7 @@ def run_all_tests():
         test_load_manifest_invalid_json,
         test_discover_custom_dir,
         test_reload_tools,
+        test_find_tool_covers_all_discovered,
     ]
 
     passed = 0

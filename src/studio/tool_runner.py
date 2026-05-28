@@ -7,10 +7,9 @@ import sys
 import traceback
 from pathlib import Path
 
-from PyQt5.QtWidgets import QApplication, QMessageBox, QWidget
-
 from src.core.app_logging import get_logger, setup_console_logging
 from src.studio.base import load_object
+from src.studio.discovery import discover_tools
 from src.studio.registry import TOOLS
 
 logger = get_logger(__name__)
@@ -18,6 +17,10 @@ logger = get_logger(__name__)
 
 def find_tool(tool_id: str):
     for tool in TOOLS:
+        if tool.tool_id == tool_id:
+            return tool
+    discovered, _ = discover_tools()
+    for tool in discovered:
         if tool.tool_id == tool_id:
             return tool
     raise ValueError(f"Unknown tool_id: {tool_id}")
@@ -36,6 +39,8 @@ def check_tool(tool_id: str) -> dict[str, str | bool]:
 
 
 def run_tool(tool_id: str) -> int:
+    from PyQt5.QtWidgets import QApplication, QMessageBox, QWidget
+
     setup_console_logging()
     tool = find_tool(tool_id)
     logger.info("Starting tool: %s (%s)", tool.name, tool.tool_id)
