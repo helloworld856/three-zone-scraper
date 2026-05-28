@@ -129,7 +129,9 @@ def page_state_sources(page) -> list[dict]:
         raw = page.evaluate(
             """() => JSON.stringify({
                 sigi: window.SIGI_STATE || null,
-                universal: window.__UNIVERSAL_DATA_FOR_REHYDRATION__ || null
+                universal: window.__UNIVERSAL_DATA_FOR_REHYDRATION__ || null,
+                render: window.RENDER_DATA || null,
+                tiktok_br: window.__TIKTOK_BR_EXPORTS__ || null
             })"""
         )
         if raw:
@@ -141,7 +143,7 @@ def page_state_sources(page) -> list[dict]:
 
     try:
         html = page.content()
-        for script_id in ("SIGI_STATE", "__UNIVERSAL_DATA_FOR_REHYDRATION__"):
+        for script_id in ("SIGI_STATE", "__UNIVERSAL_DATA_FOR_REHYDRATION__", "RENDER_DATA", "__TIKTOK_BR_EXPORTS__"):
             data = parse_script_json(html, script_id)
             if isinstance(data, dict):
                 sources.append(data)
@@ -318,15 +320,31 @@ def extract_video_detail(page, video_url: str) -> dict[str, str]:
     page.goto(video_url, wait_until="domcontentloaded", timeout=DETAIL_LOAD_TIMEOUT)
     try:
         page.wait_for_selector(
-            "script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, [data-e2e='like-count']",
-            timeout=5000,
+            "script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, script#RENDER_DATA, [data-e2e='like-count'], [data-e2e='browser-nickname']",
+            timeout=8000,
         )
     except Exception:
         pass
 
-    item = item_detail_from_state(page, video_url)
+    item = None
+    for _ in range(4):
+        item = item_detail_from_state(page, video_url)
+        if item and (item.get("createTime") or item.get("create_time")):
+            break
+        page.wait_for_timeout(1000)
+
     desc = format_plain_text(item.get("desc") or item.get("description")) if item else ""
     publish_time = format_publish_time(item.get("createTime") or item.get("create_time")) if item else ""
+    
+    if not publish_time:
+        vid = parse_video_id(video_url)
+        if vid and vid.isdigit():
+            try:
+                unix_ts = int(vid) >> 32
+                if unix_ts > 1500000000:
+                    publish_time = format_publish_time(unix_ts)
+            except Exception:
+                pass
     likes = item_metric(item, "diggCount", "digg_count", "digg_count_str", "likeCount", "like_count", "like_count_str") if item else ""
     comments = item_metric(item, "commentCount", "comment_count", "comments") if item else ""
     collects = item_metric(
@@ -457,8 +475,10 @@ def process_video_batch(
                                 break
                             continue
 
-                    if not in_date_range(published_at, start_dt, end_dt):
-                        log_line(log_callback, f"      跳过：发布时间不在范围内（{published_at or '未解析'}）。")
+                    if not published_at:
+                        log_line(log_callback, "      警告：视频信息加载不完全，无法获取发布时间，为防止误杀予以放行。")
+                    elif not in_date_range(published_at, start_dt, end_dt):
+                        log_line(log_callback, f"      跳过：发布时间不在范围内（{published_at}）。")
                         processed_count += 1
                         if wait_after_detail(log_callback, stop_event, pause_event=pause_event):
                             break

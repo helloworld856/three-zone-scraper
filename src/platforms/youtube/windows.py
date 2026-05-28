@@ -125,6 +125,7 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
                     placeholder="https://www.youtube.com/@username",
                     required=True,
                 ),
+                FieldSpec("collect_target", "采集目标", kind="combo", options=("全部", "仅视频与Shorts", "仅帖子 (Posts)"), default="全部"),
                 FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
                 FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
@@ -161,6 +162,7 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
         return run_youtube_channel_works_spider(
             values["api_key"],
             values["channel_urls"],
+            values.get("collect_target", "全部"),
             int(values.get("max_video_items", 5000)),
             int(values.get("max_post_scrolls", 200)),
             values["limit_time"],
@@ -181,27 +183,32 @@ class YouTubeCommentsWindow(SimpleToolWindow):
 
     def __init__(self) -> None:
         super().__init__(
-            "YouTube 热门评论",
+            "YouTube 视频数据与评论采集",
             [
                 FieldSpec("api_key", "Google API Key", required=True),
                 FieldSpec("txt_path", "视频链接，每行一个", kind="text_or_file", required=True, placeholder="https://www.youtube.com/watch?v=xxxx"),
+                FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
+                FieldSpec("max_scan_comments", "最多获取评论数", kind="int", default=500, minimum=100, maximum=10000),
+                FieldSpec("check_type", "是否精确检测视频长短类型？", kind="combo", options=("是", "否"), default="否"),
             ],
         )
+        self.bind_field_visibility("get_comments", "是", ["max_scan_comments"])
 
     def tool_config_params(self):
         return [
-            ConfigParam("max_scan_comments", "每个视频最多扫描评论数", kind="int", default=500, minimum=100, maximum=10000),
             ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),
             ConfigParam("youtube_api_page_size", "评论每页条数", kind="int", default=100, minimum=1, maximum=100),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
-        from src.platforms.youtube.comments import run_youtube_top_comments_spider
+        from src.platforms.youtube.comments import run_youtube_video_metrics_spider
 
-        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_scan_comments", "comment_top_limit")}
-        return run_youtube_top_comments_spider(
+        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("comment_top_limit",)}
+        return run_youtube_video_metrics_spider(
             values["api_key"],
             self._text_to_tempfile(values["txt_path"]),
+            values.get("get_comments", "否"),
+            values.get("check_type", "否"),
             int(values.get("max_scan_comments", 500)),
             log_callback,
             finish_callback,
