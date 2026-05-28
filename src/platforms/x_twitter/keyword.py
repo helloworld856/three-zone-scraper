@@ -97,7 +97,14 @@ def collect_status_urls(article) -> list[str]:
 
 def is_repost_context(text: str) -> bool:
     lowered = (text or "").lower()
-    return any(token in lowered for token in ["reposted", "repost", "retweeted", "转推", "转发", "リポスト"])
+    return any(
+        token in lowered
+        for token in [
+            "reposted", "repost", "retweeted", "retweet",
+            "republished", "reposted by", "转推", "转发", "リポスト",
+            "リツイート", "再投稿", "已轉推",
+        ]
+    )
 
 def get_social_context(article) -> str:
     return safe_text(article.locator('[data-testid="socialContext"]'))
@@ -108,7 +115,7 @@ def article_contains_nested_tweet(article) -> bool:
         return True
     try:
         nested_articles = article.locator('article[data-testid="tweet"]').count()
-        return nested_articles > 1
+        return nested_articles > 0
     except Exception:
         return False
 
@@ -210,6 +217,18 @@ def _x_media_tag(media_label: str) -> str:
 
 
 def get_media_label(article) -> str:
+    """Detect media type from the article's own content.
+
+    Avoids false positives:
+    - Video thumbnails won't be counted as photos (video takes priority).
+    - Media inside embedded/quoted tweets is ignored — we only look at
+      the article's direct children, not nested articles.
+    """
+    # If this article embeds another tweet (repost / quote), only look at
+    # media that belongs to the outer article itself by excluding the
+    # nested article subtree.
+    embedded_root = _find_embedded_tweet_root(article)
+
     labels: list[str] = []
     video_selectors = [
         "video",
@@ -222,28 +241,89 @@ def get_media_label(article) -> str:
     photo_selectors = [
         '[data-testid="tweetPhoto"]',
         'a[href*="/photo/"]',
-        'img[src*="twimg.com/media"]',
-        'div[aria-label*="Image"]',
-        'div[aria-label*="图片"]',
-        'div[aria-label*="画像"]',
     ]
+
+    def _element_is_inside_embedded(el_handle) -> bool:
+        if embedded_root is None:
+            return False
+        try:
+            return bool(article.evaluate(
+                """([el, root]) => {
+                    let node = el;
+                    while (node && node !== root && node !== document.body) {
+                        node = node.parentElement;
+                    }
+                    return node === root;
+                }""",
+                [el_handle, embedded_root],
+            ))
+        except Exception:
+            return False
+
+    has_video = False
     for selector in video_selectors:
         try:
-            if article.locator(selector).count() > 0:
-                labels.append("视频")
-                break
+            elements = article.locator(selector).all()
         except Exception:
             continue
-    for selector in photo_selectors:
-        try:
-            if article.locator(selector).count() > 0:
-                labels.append("图片")
+        for el in elements:
+            try:
+                if not _element_is_inside_embedded(el):
+                    has_video = True
+                    break
+            except Exception:
+                continue
+        if has_video:
+            break
+
+    has_photo = False
+    # Only check photos if no video detected (avoid thumbnail false positives)
+    if not has_video:
+        for selector in photo_selectors:
+            try:
+                elements = article.locator(selector).all()
+            except Exception:
+                continue
+            for el in elements:
+                try:
+                    if not _element_is_inside_embedded(el):
+                        has_photo = True
+                        break
+                except Exception:
+                    continue
+            if has_photo:
                 break
-        except Exception:
-            continue
-    if (article.inner_text() or "").split('\n')[0].strip().lower() == "gif":
-        labels.append("GIF")
+
+    if has_video:
+        labels.append("视频")
+    if has_photo:
+        labels.append("图片")
+
+    if not has_video and not has_photo:
+        first_line = (article.inner_text() or "").split("\n")[0].strip().lower()
+        if first_line == "gif":
+            labels.append("GIF")
+
     return f"[{' + '.join(labels)}]" if labels else ""
+
+
+def _find_embedded_tweet_root(article):
+    """Return the root element of a nested/embedded tweet inside *article*, or None."""
+    try:
+        return article.evaluate("""el => {
+            const nested = el.querySelector(
+                'article[data-testid="tweet"]:not([data-testid="tweet"] [data-testid="tweet"])'
+            );
+            if (nested && nested !== el) {
+                // Walk up one level to capture the quote/repost container
+                let container = nested.closest('[role="link"]');
+                if (!container) container = nested.parentElement;
+                return container || nested;
+            }
+            return null;
+        }""")
+    except Exception:
+        return None
 
 
 def should_keep_article(article) -> bool:
@@ -279,19 +359,53 @@ def _make_keyword_log_callback(base_log_callback, keyword: str):
     return log
 
 
+def _try_reload_if_empty(page, page_timeout, refresh_count, refresh_interval, log, stop_event, label="页面"):
+    """After goto, reload the page if no tweet articles appear."""
+    for attempt in range(refresh_count + 1):
+        if should_stop(stop_event):
+            return
+        try:
+            page.wait_for_selector('article[data-testid="tweet"]', state="attached", timeout=15000)
+            return
+        except Exception:
+            if attempt < refresh_count:
+                log(f"  {label}未加载内容，第 {attempt + 1}/{refresh_count} 次刷新...")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=page_timeout)
+                except Exception:
+                    pass
+                if interruptible_sleep(refresh_interval, stop_event):
+                    return
+
+
 def _x_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock,
                        log_callback, stop_event, pause_event, max_comments,
-                       consumers_ready=None):
+                       consumers_ready=None, page_timeout=30000,
+                       comment_no_new_scroll_limit=5,
+                       comment_refresh_count=3, comment_refresh_interval=5.0):
     """Consumer thread: creates its own Playwright connection + page, pops from queue."""
     log = _make_keyword_log_callback(log_callback, keyword)
+    comments_page = None
     try:
         with sync_playwright() as p:
-            _, context = connect_existing_chromium(p, cdp_port_or_url)
-            comments_page = context.new_page()
+            try:
+                _, context = connect_existing_chromium(p, cdp_port_or_url)
+                comments_page = context.new_page()
+            except Exception as exc:
+                log(f"    评论线程连接浏览器失败: {exc}")
+                return
             if consumers_ready is not None:
                 consumers_ready.set()
             while True:
-                item = queue_obj.get()
+                try:
+                    item = queue_obj.get(timeout=3)
+                except Exception:
+                    # queue.get can raise on timeout; check if we should keep waiting
+                    if should_stop(stop_event):
+                        break
+                    if wait_if_paused(pause_event, stop_event):
+                        break
+                    continue
                 if item is None:
                     break
                 if should_stop(stop_event):
@@ -300,13 +414,14 @@ def _x_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock
                     break
                 serial_number, tweet_url, max_scan = item
                 try:
-                    comments_page.goto(tweet_url, wait_until="domcontentloaded", timeout=30000)
-                    comments_page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
-                    interruptible_sleep(2, stop_event)
+                    comments_page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_timeout)
+                    interruptible_sleep(random.uniform(2, 3), stop_event)
+                    _try_reload_if_empty(comments_page, page_timeout, comment_refresh_count, comment_refresh_interval, log, stop_event, "评论页")
+                    interruptible_sleep(random.uniform(3, 5), stop_event)
                     comments = extract_comments(comments_page, tweet_url, max_scan, log,
-                                                stop_event, pause_event=pause_event)
+                                                stop_event, pause_event=pause_event,
+                                                no_new_scroll_limit=comment_no_new_scroll_limit)
                     with writer_lock:
-                        comment_count = 0
                         for comment in comments:
                             comment_row = {
                                 "序号": str(serial_number),
@@ -316,20 +431,69 @@ def _x_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock
                                 "评论发布时间": comment.get("time", ""),
                             }
                             writer.writerow("评论信息", sanitize_csv_row(comment_row))
-                            comment_count += 1
-                            if comment_count % 20 == 0:
-                                writer.save()
+                        writer.save()
                 except Exception as exc:
                     log(f"    提取评论失败：{exc}")
     except Exception as exc:
         log(f"评论线程异常: {exc}")
+    finally:
+        if comments_page is not None:
+            try:
+                if not comments_page.is_closed():
+                    comments_page.close()
+            except Exception:
+                pass
+
+
+RECOMMENDATION_MARKERS = (
+    "discover more", "find more", "发现更多", "更多了解",
+    "もっと見る", "더 보기", "encontrar más", "descubre más",
+    "weiter entdecken", "scopri di più",
+)
+
+
+def _find_recommendation_boundary_index(page) -> int:
+    """Return the index of the first article after the recommendation divider, or -1 if none found."""
+    try:
+        return page.evaluate("""markers => {
+            const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+            if (articles.length === 0) return -1;
+            // Search for a cellInnerDiv that contains marker text but no tweet article.
+            const cells = document.querySelectorAll('[data-testid="cellInnerDiv"]');
+            for (const cell of cells) {
+                if (cell.querySelector('article[data-testid="tweet"]')) continue;
+                const text = (cell.textContent || '').trim().toLowerCase();
+                if (markers.some(m => text.includes(m))) {
+                    for (let i = 0; i < articles.length; i++) {
+                        if (cell.compareDocumentPosition(articles[i]) & 2) return i;
+                    }
+                    return articles.length;
+                }
+            }
+            // Fallback: search for any heading/span outside articles
+            for (const heading of document.querySelectorAll('[role="heading"], h1, h2, h3')) {
+                const text = (heading.textContent || '').trim().toLowerCase();
+                if (markers.some(m => text.includes(m))) {
+                    for (let i = 0; i < articles.length; i++) {
+                        if (heading.compareDocumentPosition(articles[i]) & 2) return i;
+                    }
+                    return articles.length;
+                }
+            }
+            return -1;
+        }""", list(RECOMMENDATION_MARKERS))
+    except Exception:
+        return -1
 
 
 def _scrape_single_x_keyword(base_keyword, adv_params, port,
                              log_callback, stop_event, pause_event,
                              search_page_timeout, scroll_cooldown_min, scroll_cooldown_max,
                              no_change_threshold, max_search_scrolls, slice_days,
-                             max_comment_tabs, max_queue_size):
+                             max_comment_tabs, max_queue_size,
+                             comment_no_new_scroll_limit=5,
+                             search_refresh_count=3, search_refresh_interval=5.0,
+                             comment_refresh_count=3, comment_refresh_interval=5.0):
     """Scrape a single X keyword in this thread. Spawns comment consumer threads if needed."""
     log = _make_keyword_log_callback(log_callback, base_keyword)
     output_path = None
@@ -386,7 +550,9 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                         target=_x_comment_consumer,
                         args=(base_keyword, comment_queue, port, writer, writer_lock,
                               log_callback, stop_event, pause_event, max_comments,
-                              consumers_ready),
+                              consumers_ready, search_page_timeout,
+                              comment_no_new_scroll_limit,
+                              comment_refresh_count, comment_refresh_interval),
                         daemon=True,
                     )
                     t.start()
@@ -427,6 +593,7 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
 
                 if interruptible_sleep(random.uniform(4, 6), stop_event):
                     break
+                _try_reload_if_empty(search_page, search_page_timeout, search_refresh_count, search_refresh_interval, log, stop_event, "搜索页")
                 slice_count = 0
                 previous_count = -1
                 no_change_strikes = 0
@@ -449,7 +616,11 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                         pass
 
                     stop_outer = False
-                    for article in search_page.locator('article[data-testid="tweet"]').all():
+                    all_articles = search_page.locator('article[data-testid="tweet"]').all()
+                    boundary_idx = _find_recommendation_boundary_index(search_page)
+                    if boundary_idx >= 0:
+                        all_articles = all_articles[:boundary_idx]
+                    for article in all_articles:
                         if should_stop(stop_event):
                             break
                         if wait_if_paused(pause_event, stop_event):
@@ -491,7 +662,14 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                                 comment_str = row.get("评论数", "0")
                                 if comment_str not in ("0", "未知", ""):
                                     if consumers_ready.wait(timeout=0.5):
-                                        comment_queue.put((row["序号"], tweet_url, max_comments))
+                                        try:
+                                            comment_queue.put(
+                                                (row["序号"], tweet_url, max_comments),
+                                                block=True,
+                                                timeout=15,
+                                            )
+                                        except Exception:
+                                            log("    评论队列已满或消费线程异常，跳过本条评论采集。")
                                     else:
                                         log("    跳过评论采集：评论消费线程连接失败。")
 
@@ -583,6 +761,11 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
     max_parallel_tabs = max(1, min(3, int(config.get("max_parallel_tabs", 1))))
     max_comment_tabs = max(1, min(3, int(config.get("max_comment_tabs", 1))))
     max_queue_size = max(10, min(10000, int(config.get("max_queue_size", 5000))))
+    comment_no_new_scroll_limit = int(config.get("comment_no_new_scroll_limit", 5))
+    search_refresh_count = int(config.get("search_refresh_count", 3))
+    search_refresh_interval = float(config.get("search_refresh_interval", 5.0))
+    comment_refresh_count = int(config.get("comment_refresh_count", 3))
+    comment_refresh_interval = float(config.get("comment_refresh_interval", 5.0))
 
     try:
         # pre-launch Chrome once before fanning out to threads
@@ -607,6 +790,9 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                     search_page_timeout, scroll_cooldown_min, scroll_cooldown_max,
                     no_change_threshold, max_search_scrolls, slice_days,
                     max_comment_tabs, max_queue_size,
+                    comment_no_new_scroll_limit,
+                    search_refresh_count, search_refresh_interval,
+                    comment_refresh_count, comment_refresh_interval,
                 )
                 if path:
                     output_path = path
@@ -630,6 +816,9 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                     search_page_timeout, scroll_cooldown_min, scroll_cooldown_max,
                     no_change_threshold, max_search_scrolls, slice_days,
                     max_comment_tabs, max_queue_size,
+                    comment_no_new_scroll_limit,
+                    search_refresh_count, search_refresh_interval,
+                    comment_refresh_count, comment_refresh_interval,
                 )
                 future_to_keyword[future] = base_keyword
 

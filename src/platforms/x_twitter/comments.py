@@ -29,18 +29,7 @@ SCROLL_PAUSE = 4.0
 PAGE_LOAD_TIMEOUT = 30000
 NO_NEW_SCROLL_LIMIT = 5
 CSV_FIELDS = ["编号", "帖文链接", "点赞数", "评论内容", "评论发布时间"]
-RECOMMENDATION_MARKERS = (
-    "discover more",
-    "more posts",
-    "relevant people",
-    "who to follow",
-    "相关推荐",
-    "发现更多",
-    "更多帖子",
-    "相关用户",
-    "推荐关注",
-)
-PROMOTED_MARKERS = ("promoted", "广告", "推广")
+PROMOTED_MARKERS = ("promoted", "ad", "广告", "推广", "スポンサー", "pr", "赞助")
 
 def log_line(log_callback, text: str):
     if log_callback:
@@ -110,15 +99,14 @@ def text_has_promoted_marker(text: str) -> bool:
     normalized = re.sub(r"\s+", " ", raw_text).strip().lower()
     if not normalized:
         return False
-    if any(marker in normalized for marker in PROMOTED_MARKERS):
-        return True
+    for marker in PROMOTED_MARKERS:
+        if len(marker) <= 2 and marker.isascii():
+            # Short ASCII markers ("ad", "pr") need word boundary to avoid false positives
+            if re.search(r'\b' + re.escape(marker) + r'\b', normalized):
+                return True
+        elif marker in normalized:
+            return True
     return False
-
-def text_has_recommendation_marker(text: str) -> bool:
-    normalized = re.sub(r"\s+", " ", text or "").strip().lower()
-    if not normalized:
-        return False
-    return any(marker.lower() in normalized for marker in RECOMMENDATION_MARKERS)
 
 def is_promoted_tweet(article) -> bool:
     try:
@@ -153,225 +141,6 @@ def is_promoted_tweet(article) -> bool:
             text = ""
     return text_has_promoted_marker(str(text or ""))
 
-def article_own_status_id(article) -> str:
-    try:
-        href = article.evaluate(
-            """node => {
-                const time = node.querySelector('time');
-                const link = time ? time.closest('a[href*="/status/"]') : null;
-                return link ? link.getAttribute('href') : '';
-            }"""
-        )
-    except Exception:
-        href = ""
-    return extract_status_id(str(href or ""))
-
-def article_contains_status_id(article, status_id: str) -> bool:
-    if not status_id:
-        return False
-    try:
-        hrefs = [
-            anchor.get_attribute("href") or ""
-            for anchor in article.query_selector_all('a[href*="/status/"]')
-        ]
-    except Exception:
-        hrefs = []
-    return any(status_id in href for href in hrefs)
-
-def extract_article_author_handle(article) -> str:
-    try:
-        user_name_el = article.query_selector('div[data-testid="User-Name"]')
-        if not user_name_el:
-            return ""
-        for span in user_name_el.query_selector_all("span"):
-            span_text = span.inner_text().strip()
-            if span_text.startswith("@"):
-                return normalize_handle(span_text)
-        for link in user_name_el.query_selector_all('a[role="link"]'):
-            href = link.get_attribute("href") or ""
-            handle = href.strip("/").split("/")[0]
-            if handle and handle not in {"i", "home", "search"}:
-                return normalize_handle(handle)
-    except Exception:
-        return ""
-    return ""
-
-def find_main_tweet_article(page, target_status_id: str):
-    try:
-        articles = page.query_selector_all('article[data-testid="tweet"]')
-    except Exception:
-        return None
-    for article in articles:
-        if article_own_status_id(article) == target_status_id:
-            return article
-    return None
-
-def recommendation_boundary_visible(page) -> bool:
-    markers = [marker.lower() for marker in RECOMMENDATION_MARKERS]
-    try:
-        return bool(
-            page.evaluate(
-                """markers => {
-                    const firstArticle = document.querySelector('article[data-testid="tweet"]');
-                    const conversation =
-                        (firstArticle && firstArticle.closest('[aria-label*="Conversation"], [aria-label*="对话"], [aria-label*="会話"], [aria-label*="会话"]')) ||
-                        document.querySelector('[aria-label*="Conversation"], [aria-label*="对话"], [aria-label*="会話"], [aria-label*="会话"]') ||
-                        document.querySelector('main[role="main"]') ||
-                        document.body;
-                    const nodes = Array.from(conversation.querySelectorAll('[role="heading"], h1, h2, h3, span'));
-                    return nodes.some(node => {
-                        const text = (node.innerText || node.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                        return text && markers.some(marker => text.includes(marker));
-                    });
-                }""",
-                markers,
-            )
-        )
-    except Exception:
-        return False
-
-def is_after_recommendation_boundary(article) -> bool:
-    markers = [marker.lower() for marker in RECOMMENDATION_MARKERS]
-    try:
-        return bool(
-            article.evaluate(
-                """(node, markers) => {
-                    const conversation =
-                        node.closest('[aria-label*="Conversation"], [aria-label*="对话"], [aria-label*="会話"], [aria-label*="会话"]') ||
-                        node.closest('main[role="main"]') ||
-                        document.body;
-                    const walker = document.createTreeWalker(conversation, NodeFilter.SHOW_ELEMENT);
-                    let boundarySeen = false;
-                    while (walker.nextNode()) {
-                        const current = walker.currentNode;
-                        if (current === node || current.contains(node)) {
-                            return boundarySeen;
-                        }
-                        const tag = current.tagName ? current.tagName.toLowerCase() : '';
-                        const role = current.getAttribute ? current.getAttribute('role') : '';
-                        if (!['h1', 'h2', 'h3', 'span'].includes(tag) && role !== 'heading') {
-                            continue;
-                        }
-                        const text = (current.innerText || current.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                        if (text && markers.some(marker => text.includes(marker))) {
-                            boundarySeen = true;
-                        }
-                    }
-                    return false;
-                }""",
-                markers,
-            )
-        )
-    except Exception:
-        return False
-
-def is_inside_recommendation_section(article) -> bool:
-    markers = [marker.lower() for marker in RECOMMENDATION_MARKERS]
-    try:
-        return bool(
-            article.evaluate(
-                """(node, markers) => {
-                    const hasMarker = el => {
-                        const text = (el && (el.innerText || el.getAttribute('aria-label') || '') || '')
-                            .replace(/\\s+/g, ' ')
-                            .trim()
-                            .toLowerCase();
-                        return text && markers.some(marker => text.includes(marker));
-                    };
-                    const cell = node.closest('[data-testid="cellInnerDiv"]') || node.parentElement;
-                    if (!cell) return false;
-                    const cellText = (cell.innerText || '').replace(/\\s+/g, ' ').trim();
-                    const articleText = (node.innerText || '').replace(/\\s+/g, ' ').trim();
-                    const headingText = cellText.replace(articleText, '').slice(0, 180);
-                    if (headingText && markers.some(marker => headingText.toLowerCase().includes(marker))) return true;
-                    if (hasMarker(cell.previousElementSibling)) return true;
-
-                    let current = cell.parentElement;
-                    while (current && current !== document.body) {
-                        const aria = current.getAttribute('aria-label') || '';
-                        const firstText = (current.innerText || '')
-                            .replace(/\\s+/g, ' ')
-                            .trim()
-                            .slice(0, 160)
-                            .toLowerCase();
-                        if (markers.some(marker => firstText.includes(marker))) {
-                            return true;
-                        }
-                        if (/timeline:\\s*conversation/i.test(aria) || aria.includes('对话') || aria.includes('会話') || aria.includes('会话')) {
-                            break;
-                        }
-                        current = current.parentElement;
-                    }
-                    return false;
-                }""",
-                markers,
-            )
-        )
-    except Exception:
-        return False
-
-def extract_reply_to_handles(article) -> set[str]:
-    try:
-        handles = article.evaluate(
-            """node => {
-                const result = new Set();
-                const blocks = Array.from(node.querySelectorAll('div, span'))
-                    .filter(el => {
-                        const text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-                        return text && (
-                            /replying to/i.test(text) ||
-                            text.includes('正在回复') ||
-                            text.includes('回复给') ||
-                            text.includes('回覆')
-                        );
-                    });
-                for (const block of blocks) {
-                    const text = block.innerText || '';
-                    for (const match of text.matchAll(/@([A-Za-z0-9_]+)/g)) {
-                        result.add(match[1].toLowerCase());
-                    }
-                    for (const link of block.querySelectorAll('a[href^="/"]')) {
-                        const handle = (link.getAttribute('href') || '').split('/').filter(Boolean)[0] || '';
-                        if (handle && !handle.includes('status')) {
-                            result.add(handle.toLowerCase());
-                        }
-                    }
-                }
-                return Array.from(result);
-            }"""
-        )
-    except Exception:
-        handles = []
-    return {normalize_handle(item) for item in handles if normalize_handle(item)}
-
-def is_nested_reply_article(article) -> bool:
-    try:
-        return bool(
-            article.evaluate(
-                """node => {
-                    const cell = node.closest('[data-testid="cellInnerDiv"]') || node.parentElement;
-                    if (!cell) return false;
-                    const prev = cell.previousElementSibling;
-                    return !!(prev && prev.querySelector('article[data-testid="tweet"]'));
-                }"""
-            )
-        )
-    except Exception:
-        return False
-
-def is_direct_reply_to_main(article, target_status_id: str, main_author_handle: str, own_status_id: str = "") -> bool:
-    own_status_id = own_status_id or article_own_status_id(article)
-    if target_status_id and own_status_id == target_status_id:
-        return False
-    if is_nested_reply_article(article):
-        return False
-
-    reply_to_handles = extract_reply_to_handles(article)
-    main_handle = normalize_handle(main_author_handle)
-    if reply_to_handles and main_handle and main_handle not in reply_to_handles:
-        return False
-    return True
-
 def detect_non_text_content_type(article) -> str:
     if has_selector(article, '[data-testid="videoPlayer"], video'):
         return "视频"
@@ -385,6 +154,45 @@ def detect_non_text_content_type(article) -> str:
         return "投票"
     return "非文本"
 
+def _click_show_replies_buttons(page, stop_event=None) -> int:
+    """Click all visible 'show replies' buttons to reveal hidden comments."""
+    SHOW_REPLIES_TEXTS = (
+        "show replies", "show reply", "显示回复", "显示回复内容",
+        "返信を表示", "返信をすべて表示", "답글 보기",
+        "voir les réponses", "antworten anzeigen", "mostrar respuestas",
+        "mostrar respostas", "показать ответы",
+        "show more replies", "显示更多回复", "もっと返信を表示",
+    )
+    clicked = 0
+    for _ in range(10):
+        if should_stop(stop_event):
+            break
+        try:
+            found = page.evaluate("""(texts) => {
+                let clicked = 0;
+                const allBtns = document.querySelectorAll(
+                    'button, div[role="button"], [data-testid="cellInnerDiv"] button, [data-testid="cellInnerDiv"] div[role="button"]'
+                );
+                for (const btn of allBtns) {
+                    const txt = (btn.textContent || '').trim().toLowerCase();
+                    if (texts.some(t => txt === t || txt.startsWith(t))) {
+                        btn.scrollIntoView({block: 'center'});
+                        btn.click();
+                        clicked++;
+                    }
+                }
+                return clicked;
+            }""", list(SHOW_REPLIES_TEXTS))
+            if found == 0:
+                break
+            clicked += found
+            interruptible_sleep(1.5, stop_event)
+        except Exception:
+            break
+    return clicked
+
+
+
 def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, log_callback=None, stop_event=None, scroll_pause=None, no_new_scroll_limit=None, pause_event=None) -> list[dict[str, str]]:
     if scroll_pause is None:
         scroll_pause = SCROLL_PAUSE
@@ -394,52 +202,90 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
     comments: list[dict[str, str]] = []
     seen_ids = set()
     no_new_count = 0
-    target_status_id = extract_status_id(tweet_url)
-    main_article = find_main_tweet_article(page, target_status_id)
-    main_author_handle = extract_article_author_handle(main_article) if main_article else ""
-    passed_main_section = False
+    show_replies_tried = 0
 
-    if not main_author_handle:
-        log_line(log_callback, "  未能识别主贴作者，将使用主贴之后、推荐区之前的页面顺序兜底抓取。")
-    else:
-        log_line(log_callback, f"  开始抓取一级评论，目标 {max_count} 条；主贴作者 @{main_author_handle}。")
+    log_line(log_callback, f"  开始抓取评论，目标 {max_count} 条。")
 
-    if not target_status_id:
-        passed_main_section = True
+    # Wait for first-level comments (tabindex="0") to appear.
+    try:
+        page.wait_for_selector('article[data-testid="tweet"][tabindex="0"]', timeout=8000)
+    except Exception:
+        pass
 
     while len(comments) < max_count:
         if should_stop(stop_event):
             break
         if wait_if_paused(pause_event, stop_event):
             break
-        articles = page.query_selector_all('article[data-testid="tweet"]')
-        new_found = 0
-        boundary_hit = False
 
-        for article in articles:
-            if len(comments) >= max_count:
+        # Stop if a recommendation divider ("Discover more" etc.) has appeared.
+        try:
+            boundary_hit = page.evaluate("""() => {
+                const markers = ['discover more', 'find more', '发现更多', '更多了解',
+                    'もっと見る', '더 보기', 'encontrar más', 'descubre más'];
+                const cells = document.querySelectorAll('[data-testid="cellInnerDiv"]');
+                for (const cell of cells) {
+                    if (cell.querySelector('article[data-testid="tweet"]')) continue;
+                    const text = (cell.textContent || '').trim().toLowerCase();
+                    if (markers.some(m => text.includes(m))) return true;
+                }
+                return false;
+            }""")
+            if boundary_hit:
+                log_line(log_callback, "  已到达推荐区域，停止抓取。")
                 break
+        except Exception:
+            pass
 
+        # Identify first-level comments:
+        # 1. tabindex="0" → actual comment (tabindex="-1" is the main tweet)
+        # 2. Walk backward through cellInnerDiv siblings:
+        #    - Empty cellInnerDiv → separator → first-level
+        #    - Ad cell (article with tabindex≠0) → skip, keep walking
+        #    - tabindex=0 article before separator → could be nested reply, or
+        #      first-level comment with intervening ads. Use left indentation to decide:
+        #      nested replies have ≥40px left padding; first-level comments have ~0.
+        is_first_level = page.evaluate(
+            """() => {
+                const articles = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+                const SEPARATOR_INDENT = 30;
+                return articles.map(el => {
+                    if (el.getAttribute('tabindex') !== '0') return false;
+                    const cell = el.closest('[data-testid="cellInnerDiv"]');
+                    if (!cell) return false;
+
+                    let sibling = cell.previousElementSibling;
+                    while (sibling && sibling.getAttribute('data-testid') === 'cellInnerDiv') {
+                        const siblingArticle = sibling.querySelector('article[data-testid="tweet"]');
+                        if (!siblingArticle) return true;  // empty cell → separator → first-level
+                        const sibTab = siblingArticle.getAttribute('tabindex');
+                        if (sibTab === '0') {
+                            // Found another comment before finding separator.
+                            // Check indentation: nested replies have left padding ≥ 40px.
+                            try {
+                                const cs = window.getComputedStyle(cell);
+                                const leftIndent = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.marginLeft) || 0);
+                                return leftIndent < SEPARATOR_INDENT;
+                            } catch (_) { return false; }
+                        }
+                        // sibTab is '-1' or null → ad/promoted cell, skip and continue
+                        sibling = sibling.previousElementSibling;
+                    }
+                    return false;
+                });
+            }"""
+        )
+
+        all_articles = page.query_selector_all('article[data-testid="tweet"]')
+
+        new_found = 0
+
+        for i, article in enumerate(all_articles):
             try:
-                own_status_id = article_own_status_id(article)
-                if target_status_id and own_status_id == target_status_id:
-                    passed_main_section = True
+                if i >= len(is_first_level) or not is_first_level[i]:
                     continue
-                if not passed_main_section:
-                    if target_status_id and article_contains_status_id(article, target_status_id):
-                        continue
-                    continue
-                if is_after_recommendation_boundary(article):
-                    boundary_hit = True
-                    log_line(log_callback, "  已到达推荐区域，停止抓取当前推文。")
-                    break
-                if is_inside_recommendation_section(article):
-                    boundary_hit = True
-                    log_line(log_callback, "  已进入推荐区域，停止抓取当前推文。")
-                    break
+
                 if is_promoted_tweet(article):
-                    continue
-                if not is_direct_reply_to_main(article, target_status_id, main_author_handle, own_status_id):
                     continue
 
                 # Revert auto-translation and remove CSS truncation before reading text
@@ -461,7 +307,6 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
                             tweetText.style.setProperty('overflow', 'visible', 'important');
                             tweetText.style.setProperty('-webkit-line-clamp', 'unset', 'important');
                         }
-                        // Wait for React to re-render with original text
                         await new Promise(r => setTimeout(r, 400));
                     }""")
                 except Exception:
@@ -481,7 +326,7 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
                 if not content:
                     content = f"[{detect_non_text_content_type(article)}]"
 
-                comment_id = own_status_id or f"{user_text[:80]}|{comment_time}|{content[:120]}"
+                comment_id = f"{user_text[:80]}|{comment_time}|{content[:120]}"
                 if not comment_id.strip("|") or comment_id in seen_ids:
                     continue
                 seen_ids.add(comment_id)
@@ -506,30 +351,39 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
                 like_count = "0"
                 for testid in ("like", "unlike"):
-                    btn = article.query_selector(f'button[data-testid="{testid}"]')
-                    if not btn:
+                    container = article.query_selector(f'[data-testid="{testid}"]')
+                    if not container:
                         continue
-                    raw_text = btn.inner_text().strip()
+                    # Try aria-label on the inner button/div first
+                    inner_btn = container.query_selector('button, div[role="button"]')
+                    if inner_btn:
+                        aria = inner_btn.get_attribute("aria-label") or ""
+                        match = re.search(r"([\d,.]+(?:\.\d+)?\s*[KkMmBb]?)", aria)
+                        if match:
+                            like_count = expand_compact_number(match.group(1))
+                            break
+                    # Fallback: get count from container text (the sibling span next to the icon)
+                    raw_text = container.inner_text().strip()
                     if raw_text and re.search(r"\d", raw_text):
                         like_count = expand_compact_number(raw_text)
                         break
-                    aria = btn.get_attribute("aria-label") or ""
-                    match = re.search(r"([\d,.]+(?:\.\d+)?\s*[KkMmBb]?)", aria)
-                    if match:
-                        like_count = expand_compact_number(match.group(1))
-                        break
 
                 reply_count = "0"
-                reply_btn = article.query_selector('button[data-testid="reply"]')
-                if reply_btn:
-                    raw_text = reply_btn.inner_text().strip()
-                    if raw_text and re.search(r"\d", raw_text):
-                        reply_count = expand_compact_number(raw_text)
-                    else:
-                        aria = reply_btn.get_attribute("aria-label") or ""
+                for sel in ('[data-testid="reply"]',):
+                    reply_container = article.query_selector(sel)
+                    if not reply_container:
+                        continue
+                    inner_btn = reply_container.query_selector('button, div[role="button"]')
+                    if inner_btn:
+                        aria = inner_btn.get_attribute("aria-label") or ""
                         match = re.search(r"([\d,.]+(?:\.\d+)?\s*[KkMmBb]?)", aria)
                         if match:
                             reply_count = expand_compact_number(match.group(1))
+                            break
+                    raw_text = reply_container.inner_text().strip()
+                    if raw_text and re.search(r"\d", raw_text):
+                        reply_count = expand_compact_number(raw_text)
+                        break
 
                 comments.append(
                     {
@@ -545,10 +399,17 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
             except Exception as exc:
                 log_line(log_callback, f"    解析评论时出错：{exc}")
 
-        if boundary_hit:
-            break
-
         if new_found == 0:
+            if show_replies_tried < 3:
+                extra = _click_show_replies_buttons(page, stop_event)
+                show_replies_tried += 1
+                if extra > 0:
+                    log_line(log_callback, f"  点击了 {extra} 个「显示回复」按钮。")
+                    interruptible_sleep(2.0, stop_event)
+                    # Scroll down so revealed replies enter the viewport
+                    page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+                    interruptible_sleep(scroll_pause, stop_event)
+                    continue
             no_new_count += 1
             if no_new_count >= no_new_scroll_limit:
                 log_line(log_callback, f"  连续 {no_new_scroll_limit} 次滚动没有发现新评论，停止。")
@@ -556,21 +417,18 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
         else:
             no_new_count = 0
 
-        if recommendation_boundary_visible(page):
-            log_line(log_callback, "  页面已出现推荐区域，停止继续滚动。")
-            break
-
         if len(comments) < max_count:
-            page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
+            # Scroll to bottom of page to trigger lazy loading of more comments
+            page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
             interruptible_sleep(scroll_pause, stop_event)
 
     log_line(log_callback, f"  评论抓取完成：{len(comments)} 条。")
     return comments
 
 def build_comment_rows(tweet_index: int, tweet_url: str, comments: list[dict[str, str]], top_limit=None) -> list[dict[str, str]]:
-    if top_limit is None:
-        top_limit = TOP_COMMENT_LIMIT
     top_comments = sorted(comments, key=lambda item: metric_to_int(item.get("likes", "0")), reverse=True)
+    if top_limit is not None:
+        top_comments = top_comments[:top_limit]
     return [
         {
             "编号": str(tweet_index),
@@ -579,13 +437,12 @@ def build_comment_rows(tweet_index: int, tweet_url: str, comments: list[dict[str
             "评论内容": comment.get("content", ""),
             "评论发布时间": comment.get("time", ""),
         }
-        for comment in top_comments[:top_limit]
+        for comment in top_comments
     ]
 
 def run_x_top_comments_spider(
     txt_path: str,
     cdp_port_or_url: str,
-    max_comments: int,
     log_callback,
     finish_callback,
     stop_event=None,
@@ -594,7 +451,7 @@ def run_x_top_comments_spider(
 ):
     if config is None:
         config = {}
-    tweet_comment_top_limit = int(config.get("comment_top_limit", TOP_COMMENT_LIMIT))
+    max_comments = int(config.get("comment_top_limit", TOP_COMMENT_LIMIT))
     page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
     scroll_pause_val = float(config.get("scroll_interval", SCROLL_PAUSE))
     no_new_scroll_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
@@ -611,7 +468,6 @@ def run_x_top_comments_spider(
             log_callback("未读取到有效的 X/Twitter 推文链接。")
             return
 
-        max_comments = max(tweet_comment_top_limit, int(max_comments or DEFAULT_SCAN_LIMIT))
         output_path = build_output_path("x", f"x_top_comments_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
@@ -635,14 +491,15 @@ def run_x_top_comments_spider(
                 log_callback(f"[{index}/{len(tweet_urls)}] 读取推文：{tweet_url}")
                 try:
                     page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_load_timeout_val)
-                    page.wait_for_selector('article[data-testid="tweet"]', timeout=page_load_timeout_val)
+                    interruptible_sleep(2, stop_event)
+                    page.wait_for_selector('article[data-testid="tweet"]', state="attached", timeout=page_load_timeout_val)
                     interruptible_sleep(3, stop_event)
 
                     comments = extract_comments(page, tweet_url, max_comments, log_callback, stop_event, scroll_pause=scroll_pause_val, no_new_scroll_limit=no_new_scroll_limit_val, pause_event=pause_event)
-                    rows = build_comment_rows(index, tweet_url, comments, top_limit=tweet_comment_top_limit)
+                    rows = build_comment_rows(index, tweet_url, comments)
                     writer.writerows(rows)
                     writer.save()
-                    log_callback(f"  完成：扫描主楼评论 {len(comments)} 条，写入点赞量最高的 {len(rows)} 条。")
+                    log_callback(f"  完成：抓取评论 {len(rows)} 条，按点赞量排序输出。")
                     if index % 5 == 0:
                         if random_cooldown(log_callback, stop_event, 3.0, 8.0):
                             break

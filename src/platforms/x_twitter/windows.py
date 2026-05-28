@@ -28,8 +28,15 @@ class XKeywordWindow(SimpleToolWindow):
             ConfigParam("search_page_timeout", "页面加载超时(毫秒)", kind="int", default=40000, minimum=10000, maximum=120000, step=1000),
             ConfigParam("cooldown_min", "冷却等待最小(秒)", kind="float", default=5.0, minimum=0.5, maximum=30.0, step=0.5, decimals=1),
             ConfigParam("cooldown_max", "冷却等待最大(秒)", kind="float", default=7.0, minimum=0.5, maximum=30.0, step=0.5, decimals=1),
-            ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=5, minimum=2, maximum=30),
+            ConfigParam("no_new_scroll_limit", "搜索页无新内容停止阈值", kind="int", default=5, minimum=2, maximum=30),
+            ConfigParam("comment_no_new_scroll_limit", "评论页无新内容停止阈值", kind="int", default=5, minimum=2, maximum=30),
             ConfigParam("max_scrolls", "最大滚动次数", kind="int", default=200, minimum=1, maximum=999999),
+            ConfigParam("search_refresh_count", "搜索页刷新次数", kind="int", default=3, minimum=0, maximum=10,
+                        tooltip="搜索页未加载出内容时，自动刷新重试的次数。0=不刷新。"),
+            ConfigParam("search_refresh_interval", "搜索页刷新间隔(秒)", kind="float", default=5.0, minimum=1.0, maximum=30.0, step=0.5, decimals=1),
+            ConfigParam("comment_refresh_count", "评论页刷新次数", kind="int", default=3, minimum=0, maximum=10,
+                        tooltip="评论页未加载出内容时，自动刷新重试的次数。0=不刷新。"),
+            ConfigParam("comment_refresh_interval", "评论页刷新间隔(秒)", kind="float", default=5.0, minimum=1.0, maximum=30.0, step=0.5, decimals=1),
         ]
 
     def __init__(self) -> None:
@@ -84,7 +91,7 @@ class XKeywordWindow(SimpleToolWindow):
             "get_comments": values["get_comments"],
             "max_comments": int(values["max_comments"]),
         }
-        config = {k: v for k, v in values.items() if k in ("slice_days", "search_page_timeout", "cooldown_min", "cooldown_max", "no_new_scroll_limit", "max_scrolls", "max_parallel_tabs", "max_comment_tabs", "max_queue_size")}
+        config = {k: v for k, v in values.items() if k in ("slice_days", "search_page_timeout", "cooldown_min", "cooldown_max", "no_new_scroll_limit", "comment_no_new_scroll_limit", "max_scrolls", "max_parallel_tabs", "max_comment_tabs", "max_queue_size", "search_refresh_count", "search_refresh_interval", "comment_refresh_count", "comment_refresh_interval")}
         return run_x_spider(_lines(values["keywords"]), adv_params, debug_port_from_cdp_url(DEFAULT_X_CDP_URL), log_callback, finish_callback, stop_event, config=config, pause_event=pause_event)
 
 
@@ -245,7 +252,7 @@ class XCommentsWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
-            ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),
+            ConfigParam("comment_top_limit", "每条推文抓取评论数", kind="int", default=100, minimum=1, maximum=500),
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=30000, minimum=10000, maximum=120000, step=1000),
             ConfigParam("scroll_interval", "评论滚动间隔(秒)", kind="float", default=4.0, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
             ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=5, minimum=2, maximum=30),
@@ -255,7 +262,6 @@ class XCommentsWindow(SimpleToolWindow):
         super().__init__(
             "X 热门评论",
             [
-                FieldSpec("max_scan_comments", "每条推文最多扫描主楼评论数", kind="int", default=500, minimum=100, maximum=10000),
                 FieldSpec("txt_path", "推文链接，每行一个", kind="text_or_file", required=True, placeholder="https://x.com/user/status/123"),
             ],
         )
@@ -267,7 +273,6 @@ class XCommentsWindow(SimpleToolWindow):
         return run_x_top_comments_spider(
             self._text_to_tempfile(values["txt_path"]),
             DEFAULT_X_CDP_URL,
-            int(values["max_scan_comments"]),
             log_callback,
             finish_callback,
             stop_event,

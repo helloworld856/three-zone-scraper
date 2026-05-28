@@ -413,14 +413,26 @@ def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer
                              consumers_ready=None):
     """Consumer thread: creates its own Playwright connection and page, pops from queue."""
     log = _make_keyword_log_callback(log_callback, keyword)
+    comments_page = None
     try:
         with sync_playwright() as p:
-            _, context = connect_existing_chromium(p, cdp_port_or_url)
-            comments_page = context.new_page()
+            try:
+                _, context = connect_existing_chromium(p, cdp_port_or_url)
+                comments_page = context.new_page()
+            except Exception as exc:
+                log(f"    评论线程连接浏览器失败: {exc}")
+                return
             if consumers_ready is not None:
                 consumers_ready.set()
             while True:
-                item = queue_obj.get()
+                try:
+                    item = queue_obj.get(timeout=3)
+                except Exception:
+                    if should_stop(stop_event):
+                        break
+                    if wait_if_paused(pause_event, stop_event):
+                        break
+                    continue
                 if item is None:
                     break
                 if should_stop(stop_event):
@@ -452,6 +464,13 @@ def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer
                     log(f"评论采集异常: {exc}")
     except Exception as exc:
         log(f"评论线程异常: {exc}")
+    finally:
+        if comments_page is not None:
+            try:
+                if not comments_page.is_closed():
+                    comments_page.close()
+            except Exception:
+                pass
 
 
 def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
@@ -557,7 +576,14 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                                 writer.writerow("视频信息", sanitize_csv_row(row))
                             if count_to_int(row.get("评论数", "0")) > 0:
                                 if consumers_ready.wait(timeout=0.5):
-                                    comment_queue.put((serial_number, video_url, max_comments))
+                                    try:
+                                        comment_queue.put(
+                                            (serial_number, video_url, max_comments),
+                                            block=True,
+                                            timeout=15,
+                                        )
+                                    except Exception:
+                                        log("    评论队列已满或消费线程异常，跳过本条评论采集。")
                                 else:
                                     log("    跳过评论采集：评论消费线程连接失败。")
                         else:
