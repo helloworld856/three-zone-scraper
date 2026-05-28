@@ -15,12 +15,14 @@ SCAN_DIRS = [
 ]
 
 
-def discover_tools(scan_dirs: Sequence[str] | None = None) -> list[ToolSpec]:
+def discover_tools(scan_dirs: Sequence[str] | None = None) -> tuple[list[ToolSpec], list[str]]:
     if scan_dirs is None:
         scan_dirs = SCAN_DIRS
 
     project_root = Path(__file__).resolve().parents[2]
     tools: list[ToolSpec] = []
+    errors: list[str] = []
+    seen_ids: set[str] = set()
 
     for scan_dir in scan_dirs:
         base = project_root / scan_dir
@@ -30,32 +32,48 @@ def discover_tools(scan_dirs: Sequence[str] | None = None) -> list[ToolSpec]:
 
         for manifest_path in sorted(base.rglob("*.manifest.json")):
             try:
-                tool = _load_manifest(manifest_path)
+                tool, err = _load_manifest(manifest_path)
+                if err:
+                    errors.append(err)
                 if tool:
-                    tools.append(tool)
-            except Exception:
-                logger.exception("Failed to load manifest: %s", manifest_path)
+                    if tool.tool_id in seen_ids:
+                        err_msg = f"工具 ID 冲突: '{tool.tool_id}' ({manifest_path})"
+                        logger.error(err_msg)
+                        errors.append(err_msg)
+                    else:
+                        seen_ids.add(tool.tool_id)
+                        tools.append(tool)
+            except Exception as e:
+                err_msg = f"加载 {manifest_path} 时发生未捕获异常: {e}"
+                logger.exception(err_msg)
+                errors.append(err_msg)
 
-    return tools
+    return tools, errors
 
 
-def _load_manifest(path: Path) -> ToolSpec | None:
+def _load_manifest(path: Path) -> tuple[ToolSpec | None, str | None]:
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-    except json.JSONDecodeError:
-        logger.error("Manifest %s contains invalid JSON", path)
-        return None
+    except json.JSONDecodeError as e:
+        err = f"文件 {path.name} 包含无效的 JSON: {e}"
+        logger.error(err)
+        return None, err
+    except Exception as e:
+        err = f"无法读取文件 {path.name}: {e}"
+        logger.error(err)
+        return None, err
 
     required = {"tool_id", "name", "category", "summary", "entrypoint"}
     missing = required - set(data)
     if missing:
-        logger.error("Manifest %s missing required fields: %s", path, missing)
-        return None
+        err = f"文件 {path.name} 缺少必需字段: {missing}"
+        logger.error(err)
+        return None, err
 
     tags = tuple(data.get("tags", []))
 
-    return ToolSpec(
+    tool = ToolSpec(
         tool_id=data["tool_id"],
         name=data["name"],
         category=data["category"],
@@ -64,3 +82,4 @@ def _load_manifest(path: Path) -> ToolSpec | None:
         implementation_path=data.get("implementation_path", ""),
         tags=tags,
     )
+    return tool, None

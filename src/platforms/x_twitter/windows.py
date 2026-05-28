@@ -204,8 +204,7 @@ class XProfileTweetsWindow(SimpleToolWindow):
                     placeholder="https://x.com/username",
                     required=True,
                 ),
-                FieldSpec("use_keywords", "是否使用关键词搜索？", kind="combo", options=("是", "否"), default="否"),
-                FieldSpec("keywords", "搜索关键词，每行一个", kind="text_or_file", placeholder="每行一个关键词", default=""),
+                FieldSpec("keywords", "搜索关键词，每行一个", kind="text_or_file", placeholder="当帖文数>1000时自动使用的补充关键词", default=""),
                 FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
                 FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
@@ -214,7 +213,6 @@ class XProfileTweetsWindow(SimpleToolWindow):
             ],
             height=820,
         )
-        self.bind_field_visibility("use_keywords", "是", ["keywords"])
         self.bind_field_visibility("limit_time", "是", ["start_date", "end_date"])
         self.bind_field_visibility("get_comments", "是", ["max_comments"])
 
@@ -228,7 +226,6 @@ class XProfileTweetsWindow(SimpleToolWindow):
         config = {k: v for k, v in values.items() if k in ("page_load_timeout", "scroll_interval", "no_new_scroll_limit", "max_scrolls", "save_batch_size", "cooldown_min", "cooldown_max")}
         return run_x_profile_tweets_spider(
             values["profile_urls"],
-            values["use_keywords"],
             values["keywords"],
             values["limit_time"],
             values["start_date"],

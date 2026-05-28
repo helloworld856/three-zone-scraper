@@ -162,6 +162,29 @@ def cooldown_after_batch(total_written: int, log_callback, stop_event=None, paus
         time.sleep(min(0.5, deadline - time.time()))
 
 
+def extract_post_count(page) -> int | None:
+    return page.evaluate(
+        """() => {
+            try {
+                const headings = Array.from(document.querySelectorAll('h2[role="heading"], div[dir="auto"]'));
+                for (const h of headings) {
+                    const text = (h.parentElement ? h.parentElement.innerText : h.innerText) || '';
+                    const match = text.match(/(\\d[\\d,.]*[KkMm]?)\\s*(posts?|帖子|ポスト|件のポスト)/i);
+                    if (match) {
+                        let numStr = match[1].toUpperCase();
+                        let multiplier = 1;
+                        if (numStr.includes('K')) { multiplier = 1000; numStr = numStr.replace('K', ''); }
+                        else if (numStr.includes('M')) { multiplier = 1000000; numStr = numStr.replace('M', ''); }
+                        numStr = numStr.replace(/,/g, '');
+                        return Math.floor(parseFloat(numStr) * multiplier);
+                    }
+                }
+            } catch (e) {}
+            return null;
+        }"""
+    )
+
+
 def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
     username_lc = username.lower().lstrip("@")
     return page.evaluate(
@@ -315,6 +338,7 @@ def collect_profile_tweets(
     cooldown_max=None,
     pause_event=None,
     keyword: str | None = None,
+    max_collect: int | None = None,
 ) -> list[dict[str, str]] | tuple[list[dict[str, str]], int, int]:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
@@ -417,6 +441,9 @@ def collect_profile_tweets(
                     if should_stop(stop_event):
                         break
 
+            if max_collect is not None and len(tweets) >= max_collect:
+                break
+
         if added:
             log_line(log_callback, f"  滚动 {scroll_index + 1}/{max_scrolls}：新增 {added} 条，累计 {len(tweets)} 条。")
             no_new_count = 0
@@ -425,6 +452,10 @@ def collect_profile_tweets(
             if no_new_count >= no_new_scroll_limit:
                 log_line(log_callback, f"  连续 {no_new_scroll_limit} 次没有新增帖子，停止。")
                 break
+
+        if max_collect is not None and len(tweets) >= max_collect:
+            log_line(log_callback, f"  达到指定采集上限 {max_collect} 条，停止滚动。")
+            break
 
         if should_stop(stop_event):
             break
@@ -456,7 +487,6 @@ def build_rows(tweets: list[dict[str, str]]) -> list[dict[str, str]]:
 
 def run_x_profile_tweets_spider(
     profile_urls_text: str,
-    use_keywords_str: str,
     keywords_text: str,
     limit_time_str: str,
     start_date: str,
@@ -522,17 +552,11 @@ def run_x_profile_tweets_spider(
             page = context.new_page()
             detail_page = context.new_page() if get_comments_bool else None
 
-            use_keywords_bool = use_keywords_str == "是"
-            keyword_list = [None]
-            if use_keywords_bool:
-                parsed_kws = [k.strip() for k in keywords_text.splitlines() if k.strip()]
-                if parsed_kws:
-                    keyword_list = parsed_kws
-                else:
-                    log_line(log_callback, "启用了关键词搜索但未提供关键词，将按无关键词采集。")
+            parsed_kws = [k.strip() for k in keywords_text.splitlines() if k.strip()]
+            keyword_list = parsed_kws if parsed_kws else []
 
-            total_tasks = len(profile_urls) * len(keyword_list)
-            task_index = 0
+            total_profiles = len(profile_urls)
+            profile_index = 0
 
             for profile_url in profile_urls:
                 if should_stop(stop_event):
@@ -541,45 +565,50 @@ def run_x_profile_tweets_spider(
                 if wait_if_paused(pause_event, stop_event):
                     break
 
-                for kw in keyword_list:
-                    if should_stop(stop_event):
-                        break
-                    if wait_if_paused(pause_event, stop_event):
-                        break
+                profile_index += 1
+                username = extract_profile_username(profile_url)
+                log_line(log_callback, f"[{profile_index}/{total_profiles}] 开始处理博主主页：{profile_url}")
+                
+                try:
+                    # 获取主页以提取帖文数
+                    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_load_timeout_val)
+                    interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
+                    post_count = extract_post_count(page)
+                    
+                    if post_count is None:
+                        log_line(log_callback, "  无法提取博主帖文数量，按全量模式正常采集。")
+                    else:
+                        log_line(log_callback, f"  博主帖文数量：{post_count}")
 
-                    task_index += 1
-                    username = extract_profile_username(profile_url)
-                    kw_info = f" (关键词: {kw})" if kw else ""
-                    log_line(log_callback, f"[{task_index}/{total_tasks}] 读取主页：{profile_url}{kw_info}")
-                    try:
+                    if post_count is None or post_count <= 1000:
                         _, row_offset, written_count = collect_profile_tweets(
-                            page,
-                            detail_page,
-                            profile_url,
-                            max_scrolls,
-                            limit_time_bool,
-                            start_dt,
-                            end_dt,
-                            get_comments_bool,
-                            max_comments_val,
-                            log_callback,
-                            stop_event,
-                            writer=writer,
-                            row_offset=row_offset,
-                            page_timeout=page_load_timeout_val,
-                            scroll_delay=scroll_delay_val,
-                            no_new_scroll_limit=no_new_scroll_limit_val,
-                            save_batch_size=save_batch_size_val,
-                            cooldown_min=cooldown_min_val,
-                            cooldown_max=cooldown_max_val,
-                            pause_event=pause_event,
-                            keyword=kw,
+                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, pause_event=pause_event, keyword=None, max_collect=None
                         )
-                        log_line(log_callback, f"  完成 @{username}{kw_info}：写入 {written_count} 条帖子。")
-                    except PlaywrightTimeoutError:
-                        log_line(log_callback, "  跳过：页面加载超时，请确认链接可打开且账号已登录。")
-                    except Exception as exc:
-                        log_line(log_callback, f"  跳过：{exc}")
+                        log_line(log_callback, f"  完成 @{username} 全量采集：写入 {written_count} 条帖子。")
+                    else:
+                        log_line(log_callback, "  帖文数大于 1000，首先采集前 1000 条帖子...")
+                        _, row_offset, written_count = collect_profile_tweets(
+                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, pause_event=pause_event, keyword=None, max_collect=1000
+                        )
+                        log_line(log_callback, f"  完成截断采集：新增写入 {written_count} 条帖子。")
+                        
+                        if keyword_list:
+                            log_line(log_callback, f"  开始按关键词进行补充采集 (共 {len(keyword_list)} 个关键词)...")
+                            for kw in keyword_list:
+                                if should_stop(stop_event):
+                                    break
+                                log_line(log_callback, f"  -> 补充采集关键词: {kw}")
+                                _, row_offset, kw_written = collect_profile_tweets(
+                                    page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, pause_event=pause_event, keyword=kw, max_collect=None
+                                )
+                                log_line(log_callback, f"  完成关键词 '{kw}' 采集：新增写入 {kw_written} 条。")
+                        else:
+                            log_line(log_callback, "  未提供补充搜索关键词，跳过补充采集阶段。")
+
+                except PlaywrightTimeoutError:
+                    log_line(log_callback, "  跳过：页面加载超时，请确认链接可打开且账号已登录。")
+                except Exception as exc:
+                    log_line(log_callback, f"  跳过：{exc}")
 
             for opened_page in (page, detail_page):
                 if opened_page is not None and not opened_page.is_closed():

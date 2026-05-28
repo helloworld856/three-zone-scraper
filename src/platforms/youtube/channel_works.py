@@ -220,6 +220,7 @@ def video_rows_from_api(youtube, video_ids: list[str], stop_event=None, pause_ev
                     "views": stats.get("viewCount", ""),
                     "comments": stats.get("commentCount", ""),
                     "likes": stats.get("likeCount", ""),
+                    "source": "api",
                 }
             )
     return rows
@@ -381,6 +382,7 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
                     "views": sanitize_csv_cell(normalize_metric_text(item.get("views", ""))),
                     "comments": "",
                     "likes": "",
+                    "source": "playwright",
                 }
             )
             added += 1
@@ -561,6 +563,7 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
                     "views": sanitize_csv_cell(normalize_metric_text(item.get("views", ""))),
                     "comments": sanitize_csv_cell(normalize_metric_text(item.get("comments", ""))),
                     "likes": sanitize_csv_cell(normalize_metric_text(item.get("likes", ""))),
+                    "source": "playwright",
                 }
             )
             added += 1
@@ -596,6 +599,7 @@ def row_from_work(index: int, work: dict[str, str], channel_url: str = "") -> di
 def run_youtube_channel_works_spider(
     api_key: str,
     channel_urls_text: str,
+    collect_target: str = "全部",
     max_video_items: int = DEFAULT_MAX_VIDEO_ITEMS,
     max_post_scrolls: int = DEFAULT_MAX_POST_SCROLLS,
     limit_time_str: str = "否",
@@ -671,46 +675,54 @@ def run_youtube_channel_works_spider(
             log_line(log_callback, f"[{channel_index}/{len(channel_urls)}] 读取作者主页：{channel_url}")
             works: list[dict[str, str]] = []
             should_fallback_video_tabs = False
-            if youtube is None:
-                should_fallback_video_tabs = True
-                log_line(log_callback, "  YouTube API 不可用，尝试用浏览器读取 Videos/Shorts。")
-            else:
-                try:
-                    works = collect_video_works_with_api(youtube, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
-                    if not works:
-                        should_fallback_video_tabs = True
-                        log_line(log_callback, "  API 未返回 Videos/Shorts，尝试用浏览器读取。")
-                except Exception as exc:
+            do_videos = collect_target in ("全部", "仅视频与Shorts")
+            do_posts = collect_target in ("全部", "仅帖子 (Posts)")
+
+            if do_videos:
+                if youtube is None:
                     should_fallback_video_tabs = True
-                    log_line(log_callback, f"  YouTube API 读取失败，尝试用浏览器读取 Videos/Shorts：{exc}")
+                    log_line(log_callback, "  YouTube API 不可用，尝试用浏览器读取 Videos/Shorts。")
+                else:
+                    try:
+                        video_works = collect_video_works_with_api(youtube, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
+                        if not video_works:
+                            should_fallback_video_tabs = True
+                            log_line(log_callback, "  API 未返回 Videos/Shorts，尝试用浏览器读取。")
+                        else:
+                            works.extend(video_works)
+                    except Exception as exc:
+                        should_fallback_video_tabs = True
+                        log_line(log_callback, f"  YouTube API 读取失败，尝试用浏览器读取 Videos/Shorts：{exc}")
 
             if sync_playwright is None:
-                if should_fallback_video_tabs:
+                if should_fallback_video_tabs and do_videos:
                     log_line(log_callback, "  缺少依赖：playwright。无法浏览器 fallback Videos/Shorts。")
-                log_line(log_callback, "  缺少依赖：playwright。跳过 Posts。")
-            elif should_fallback_video_tabs and not should_stop(stop_event):
-                try:
-                    active_page = ensure_page()
-                    if active_page is not None:
-                        works.extend(collect_video_tab_with_playwright(active_page, channel_url, "videos", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
-                        if not should_stop(stop_event):
-                            works.extend(collect_video_tab_with_playwright(active_page, channel_url, "shorts", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
-                except PlaywrightTimeoutError:
-                    log_line(log_callback, "  跳过浏览器 Videos/Shorts：页面加载超时。")
-                except Exception as exc:
-                    log_line(log_callback, f"  跳过浏览器 Videos/Shorts：{exc}")
+                if do_posts:
+                    log_line(log_callback, "  缺少依赖：playwright。跳过 Posts。")
+            else:
+                if do_videos and should_fallback_video_tabs and not should_stop(stop_event):
+                    try:
+                        active_page = ensure_page()
+                        if active_page is not None:
+                            works.extend(collect_video_tab_with_playwright(active_page, channel_url, "videos", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
+                            if not should_stop(stop_event):
+                                works.extend(collect_video_tab_with_playwright(active_page, channel_url, "shorts", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
+                    except PlaywrightTimeoutError:
+                        log_line(log_callback, "  跳过浏览器 Videos/Shorts：页面加载超时。")
+                    except Exception as exc:
+                        log_line(log_callback, f"  跳过浏览器 Videos/Shorts：{exc}")
 
-            if sync_playwright is not None and not should_stop(stop_event):
-                try:
-                    active_page = ensure_page()
-                    if active_page is not None:
-                        works.extend(collect_posts_with_playwright(active_page, channel_url, max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
-                except PlaywrightTimeoutError:
-                    log_line(log_callback, "  跳过 Posts：页面加载超时。")
-                except Exception as exc:
-                    log_line(log_callback, f"  跳过 Posts：{exc}")
+                if do_posts and not should_stop(stop_event):
+                    try:
+                        active_page = ensure_page()
+                        if active_page is not None:
+                            works.extend(collect_posts_with_playwright(active_page, channel_url, max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
+                    except PlaywrightTimeoutError:
+                        log_line(log_callback, "  跳过 Posts：页面加载超时。")
+                    except Exception as exc:
+                        log_line(log_callback, f"  跳过 Posts：{exc}")
 
-            save_batch_size = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
+            base_save_batch_size = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
             channel_written = 0
             rows_buffer: list[dict[str, str]] = []
 
@@ -756,9 +768,12 @@ def run_youtube_channel_works_spider(
                     except Exception as exc:
                         log_line(log_callback, f"    提取评论失败：{exc}")
 
+                        log_line(log_callback, f"    提取评论失败：{exc}")
+
                 serial_number += 1
 
-                if len(rows_buffer) >= save_batch_size:
+                current_batch_size = base_save_batch_size if work.get("source") == "playwright" else max(base_save_batch_size, 5000)
+                if len(rows_buffer) >= current_batch_size:
                     _flush_rows()
 
             _flush_rows()
