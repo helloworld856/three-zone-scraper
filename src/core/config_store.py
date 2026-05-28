@@ -117,12 +117,6 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "cooldown_min": 6.0,
         "cooldown_max": 15.0,
     },
-    "x_top_comments": {
-        "comment_top_limit": 100,
-        "page_load_timeout": 30000,
-        "scroll_interval": 4.0,
-        "no_new_scroll_limit": 5,
-    },
     "instagram_profile_works": {
         "max_works": 5000,
         "page_load_timeout": 45000,

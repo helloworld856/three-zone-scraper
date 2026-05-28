@@ -95,15 +95,6 @@ TOOLS: list[ToolSpec] = [
         tags=("X", "Twitter", "profile", "tweets", "timeline"),
     ),
     ToolSpec(
-        tool_id="x_top_comments",
-        name="X 热门评论",
-        category="X/Twitter",
-        summary="读取每行一个推文链接的 TXT，扫描主楼评论并导出点赞量最高的前 100 条评论。",
-        entrypoint="src.platforms.x_twitter.windows.XCommentsWindow",
-        implementation_path="platforms/x_twitter/comments.py",
-        tags=("X", "Twitter", "comments", "top", "txt"),
-    ),
-    ToolSpec(
         tool_id="tiktok_keyword_metrics",
         name="TikTok 关键词搜索",
         category="TikTok",

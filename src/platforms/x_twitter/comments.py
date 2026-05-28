@@ -2,76 +2,23 @@ from __future__ import annotations
 
 from datetime import datetime
 import re
-import time
-
-try:
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-    from playwright.sync_api import sync_playwright
-except ModuleNotFoundError:
-    PlaywrightTimeoutError = TimeoutError
-    sync_playwright = None
 
 from src.core import (
-    XlsxRowWriter,
-    build_output_path,
-    connect_existing_chromium,
     expand_compact_number,
     interruptible_sleep,
-    random_cooldown,
     sanitize_csv_cell,
     should_stop,
     wait_if_paused,
 )
 
-TOP_COMMENT_LIMIT = 100
 DEFAULT_SCAN_LIMIT = 500
 SCROLL_PAUSE = 4.0
-PAGE_LOAD_TIMEOUT = 30000
 NO_NEW_SCROLL_LIMIT = 5
-CSV_FIELDS = ["编号", "帖文链接", "点赞数", "评论内容", "评论发布时间"]
 PROMOTED_MARKERS = ("promoted", "ad", "广告", "推广", "スポンサー", "pr", "赞助")
 
 def log_line(log_callback, text: str):
     if log_callback:
         log_callback(text)
-
-def clean_url(url: str) -> str:
-    value = (url or "").strip().replace("twitter.com", "x.com")
-    if not value:
-        return ""
-    if value.startswith("//"):
-        value = "https:" + value
-    if value.startswith("/"):
-        value = "https://x.com" + value
-    if not value.startswith("http"):
-        value = "https://" + value
-    return value.split("?")[0].split("#")[0].rstrip("/")
-
-def parse_tweet_urls(txt_path: str) -> list[str]:
-    urls: list[str] = []
-    seen = set()
-    with open(txt_path, "r", encoding="utf-8-sig") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            url = clean_url(stripped.split()[0])
-            if "/status/" in url and url not in seen:
-                urls.append(url)
-                seen.add(url)
-    return urls
-
-def metric_to_int(value: str) -> int:
-    text = expand_compact_number(str(value or "0")).replace(",", "")
-    match = re.search(r"\d+", text)
-    return int(match.group(0)) if match else 0
-
-def extract_status_id(url: str) -> str:
-    match = re.search(r"/status/(\d+)", url or "")
-    return match.group(1) if match else ""
-
-def normalize_handle(value: str) -> str:
-    return (value or "").strip().lstrip("@").lower()
 
 def format_comment_time(raw_time: str) -> str:
     value = (raw_time or "").strip()
@@ -424,100 +371,3 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
     log_line(log_callback, f"  评论抓取完成：{len(comments)} 条。")
     return comments
-
-def build_comment_rows(tweet_index: int, tweet_url: str, comments: list[dict[str, str]], top_limit=None) -> list[dict[str, str]]:
-    top_comments = sorted(comments, key=lambda item: metric_to_int(item.get("likes", "0")), reverse=True)
-    if top_limit is not None:
-        top_comments = top_comments[:top_limit]
-    return [
-        {
-            "编号": str(tweet_index),
-            "帖文链接": tweet_url,
-            "点赞数": comment.get("likes", "0"),
-            "评论内容": comment.get("content", ""),
-            "评论发布时间": comment.get("time", ""),
-        }
-        for comment in top_comments
-    ]
-
-def run_x_top_comments_spider(
-    txt_path: str,
-    cdp_port_or_url: str,
-    log_callback,
-    finish_callback,
-    stop_event=None,
-    config=None,
-    pause_event=None,
-):
-    if config is None:
-        config = {}
-    max_comments = int(config.get("comment_top_limit", TOP_COMMENT_LIMIT))
-    page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
-    scroll_pause_val = float(config.get("scroll_interval", SCROLL_PAUSE))
-    no_new_scroll_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
-
-    completed_path = None
-    page = None
-    try:
-        if sync_playwright is None:
-            log_callback("缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
-            return
-
-        tweet_urls = parse_tweet_urls(txt_path)
-        if not tweet_urls:
-            log_callback("未读取到有效的 X/Twitter 推文链接。")
-            return
-
-        output_path = build_output_path("x", f"x_top_comments_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
-        writer = XlsxRowWriter(output_path, CSV_FIELDS)
-
-        with sync_playwright() as playwright:
-            log_callback("正在连接本地 Chrome...")
-            try:
-                _, context = connect_existing_chromium(playwright, cdp_port_or_url)
-            except Exception as exc:
-                log_callback(f"无法连接浏览器：{exc}")
-                log_callback("连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。")
-                return
-
-            page = context.new_page()
-
-            for index, tweet_url in enumerate(tweet_urls, 1):
-                if should_stop(stop_event):
-                    log_callback("任务已停止。")
-                    break
-                if wait_if_paused(pause_event, stop_event):
-                    break
-                log_callback(f"[{index}/{len(tweet_urls)}] 读取推文：{tweet_url}")
-                try:
-                    page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_load_timeout_val)
-                    interruptible_sleep(2, stop_event)
-                    page.wait_for_selector('article[data-testid="tweet"]', state="attached", timeout=page_load_timeout_val)
-                    interruptible_sleep(3, stop_event)
-
-                    comments = extract_comments(page, tweet_url, max_comments, log_callback, stop_event, scroll_pause=scroll_pause_val, no_new_scroll_limit=no_new_scroll_limit_val, pause_event=pause_event)
-                    rows = build_comment_rows(index, tweet_url, comments)
-                    writer.writerows(rows)
-                    writer.save()
-                    log_callback(f"  完成：抓取评论 {len(rows)} 条，按点赞量排序输出。")
-                    if index % 5 == 0:
-                        if random_cooldown(log_callback, stop_event, 3.0, 8.0):
-                            break
-                except PlaywrightTimeoutError:
-                    log_callback("  跳过：页面加载超时，请确认链接可打开且账号已登录。")
-                except Exception as exc:
-                    log_callback(f"  跳过：{exc}")
-
-            if page and not page.is_closed():
-                page.close()
-
-        completed_path = output_path
-        writer.save()
-        log_callback(f"完成，已保存：{output_path}")
-    finally:
-        try:
-            if page and not page.is_closed():
-                page.close()
-        except Exception:
-            pass
-        finish_callback(completed_path)
