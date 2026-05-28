@@ -43,6 +43,14 @@ class YouTubeKeywordWindow(SimpleToolWindow):
     def tool_config_params(self):
         return [
             ConfigParam("max_results", "最多搜索结果数", kind="int", default=5000, minimum=1, maximum=5000),
+            ConfigParam(
+                "youtube_search_method",
+                "搜索方式",
+                kind="combo",
+                options=("浏览器优先（省配额）", "仅API（消耗配额）"),
+                default="浏览器优先（省配额）",
+                tooltip="【重要】‘浏览器优先’模式利用浏览器在后台模拟搜索获取视频链接，可节省 99% 的 YouTube API 每日配额消耗！"
+            ),
             ConfigParam("youtube_search_batch_size", "搜索每页条数", kind="int", default=50, minimum=1, maximum=50),
             ConfigParam("youtube_video_batch_size", "视频详情每批条数", kind="int", default=50, minimum=1, maximum=50),
             ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),

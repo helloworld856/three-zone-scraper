@@ -21,7 +21,25 @@ from src.platforms.youtube.comments import fetch_top_level_comments
 from src.platforms.youtube.keyword import parse_date_range
 
 
-CSV_FIELDS = ["序号", "作者主页链接", "作品链接", "作品内容", "浏览量", "评论数", "点赞数"]
+CSV_FIELDS = [
+    "序号",
+    "编号",
+    "视频链接",
+    "作品链接",
+    "博主主页链接",
+    "作者主页链接",
+    "标题",
+    "作品内容",
+    "频道名称",
+    "发布日期",
+    "视频类型",
+    "视频时长",
+    "视频简介",
+    "播放量",
+    "浏览量",
+    "点赞数",
+    "评论数",
+]
 PAGE_LOAD_TIMEOUT = 45000
 INITIAL_LOAD_DELAY = 1.8
 POST_SCROLL_DELAY = 0.8
@@ -198,29 +216,67 @@ def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items:
 
 def video_rows_from_api(youtube, video_ids: list[str], stop_event=None, pause_event=None) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
+    from src.platforms.youtube.comments import format_youtube_datetime, build_video_url
+    from src.platforms.youtube.keyword import format_youtube_duration as kw_format
+    
+    def parse_api_video_type(duration_str: str) -> str:
+        if not duration_str:
+            return "普通视频"
+        formatted = kw_format(duration_str)
+        if not formatted:
+            return "普通视频"
+        parts = list(map(int, formatted.split(":")))
+        total_seconds = 0
+        if len(parts) == 3:
+            total_seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
+        elif len(parts) == 2:
+            total_seconds = parts[0] * 60 + parts[1]
+        else:
+            total_seconds = parts[0]
+        return "Shorts" if total_seconds <= 60 else "普通视频"
+
     for batch in chunked(video_ids, 50):
         if should_stop(stop_event):
             break
         if wait_if_paused(pause_event, stop_event):
             break
-        response = youtube.videos().list(part="snippet,statistics", id=",".join(batch), maxResults=50).execute()
+        response = youtube.videos().list(part="snippet,statistics,contentDetails", id=",".join(batch), maxResults=50).execute()
         for item in response.get("items", []):
             if should_stop(stop_event):
                 break
             snippet = item.get("snippet", {})
             stats = item.get("statistics", {})
+            content = item.get("contentDetails", {})
             video_id = item.get("id", "")
             title = (snippet.get("title") or "").strip()
             if not video_id or not title:
                 continue
+            
+            raw_duration = content.get("duration", "")
+            duration = kw_format(raw_duration)
+            v_type = parse_api_video_type(raw_duration)
+            final_link = build_video_url(video_id, v_type)
+            
+            pub_date = format_youtube_datetime(snippet.get("publishedAt", ""))
+            desc = snippet.get("description", "").replace("\n", " | ").replace("\r", "")
+            if len(desc) > 300:
+                desc = desc[:300] + "..."
+                
             rows.append(
                 {
-                    "link": f"https://www.youtube.com/watch?v={video_id}",
+                    "link": final_link,
                     "content": f"{title}[视频]",
                     "views": stats.get("viewCount", ""),
                     "comments": stats.get("commentCount", ""),
                     "likes": stats.get("likeCount", ""),
                     "source": "api",
+                    "title": title,
+                    "channel_title": snippet.get("channelTitle", ""),
+                    "channel_id": snippet.get("channelId", ""),
+                    "published_at": pub_date,
+                    "video_type": v_type,
+                    "duration": duration,
+                    "description": desc,
                 }
             )
     return rows
@@ -375,14 +431,32 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
             if not link or not content or link in seen_links:
                 continue
             seen_links.add(link)
+            
+            from src.platforms.youtube.comments import build_video_url
+            video_id = ""
+            if "watch?v=" in link:
+                video_id = link.split("v=")[1].split("&")[0]
+            elif "shorts/" in link:
+                video_id = link.split("shorts/")[1].split("?")[0]
+            
+            v_type = "普通视频" if tab == "videos" else "Shorts"
+            final_link = build_video_url(video_id, v_type) if video_id else link
+            
             works.append(
                 {
-                    "link": sanitize_csv_cell(link),
+                    "link": sanitize_csv_cell(final_link),
                     "content": sanitize_csv_cell(content),
                     "views": sanitize_csv_cell(normalize_metric_text(item.get("views", ""))),
                     "comments": "",
                     "likes": "",
                     "source": "playwright",
+                    "title": content.replace("[视频]", ""),
+                    "channel_title": "",
+                    "channel_id": "",
+                    "published_at": "",
+                    "video_type": v_type,
+                    "duration": "",
+                    "description": "",
                 }
             )
             added += 1
@@ -564,6 +638,13 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
                     "comments": sanitize_csv_cell(normalize_metric_text(item.get("comments", ""))),
                     "likes": sanitize_csv_cell(normalize_metric_text(item.get("likes", ""))),
                     "source": "playwright",
+                    "title": content[:50] + "..." if len(content) > 50 else content,
+                    "channel_title": "",
+                    "channel_id": "",
+                    "published_at": "",
+                    "video_type": "帖子",
+                    "duration": "",
+                    "description": content,
                 }
             )
             added += 1
@@ -585,14 +666,27 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
 
 
 def row_from_work(index: int, work: dict[str, str], channel_url: str = "") -> dict[str, str]:
+    ch_id = work.get("channel_id", "")
+    ch_url = f"https://www.youtube.com/channel/{ch_id}" if ch_id else channel_url
+    
     return {
         "序号": str(index),
-        "作者主页链接": channel_url,
+        "编号": str(index),
+        "视频链接": work.get("link", ""),
         "作品链接": work.get("link", ""),
+        "博主主页链接": ch_url,
+        "作者主页链接": channel_url,
+        "标题": work.get("title", ""),
         "作品内容": work.get("content", ""),
+        "频道名称": work.get("channel_title", ""),
+        "发布日期": work.get("published_at", ""),
+        "视频类型": work.get("video_type", ""),
+        "视频时长": work.get("duration", ""),
+        "视频简介": work.get("description", ""),
+        "播放量": work.get("views", ""),
         "浏览量": work.get("views", ""),
-        "评论数": work.get("comments", ""),
         "点赞数": work.get("likes", ""),
+        "评论数": work.get("comments", ""),
     }
 
 
@@ -648,7 +742,7 @@ def run_youtube_channel_works_spider(
             
         output_path = build_output_path("youtube", f"youtube_channel_works_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         if get_comments_bool:
-            comment_fields = ["序号", "作品链接", "评论的点赞量", "评论内容", "评论发布时间"]
+            comment_fields = ["序号", "编号", "视频链接", "作品链接", "评论的点赞量", "评论内容", "发布时间", "评论发布时间"]
             writer = MultiSheetXlsxWriter(output_path, {"作品信息": CSV_FIELDS, "评论信息": comment_fields})
         else:
             writer = XlsxRowWriter(output_path, CSV_FIELDS)
@@ -759,15 +853,16 @@ def run_youtube_channel_works_spider(
                             for comment in comments[:max_comments]:
                                 comment_row = {
                                     "序号": str(serial_number),
+                                    "编号": str(serial_number),
+                                    "视频链接": work_link,
                                     "作品链接": work_link,
                                     "评论的点赞量": str(comment["like_count"]),
                                     "评论内容": comment["text"],
+                                    "发布时间": comment.get("published_at", ""),
                                     "评论发布时间": comment.get("published_at", "")
                                 }
                                 writer.writerow("评论信息", comment_row)
                     except Exception as exc:
-                        log_line(log_callback, f"    提取评论失败：{exc}")
-
                         log_line(log_callback, f"    提取评论失败：{exc}")
 
                 serial_number += 1
