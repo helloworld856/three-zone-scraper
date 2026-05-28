@@ -166,10 +166,12 @@ def extract_post_count(page) -> int | None:
     return page.evaluate(
         """() => {
             try {
-                const headings = Array.from(document.querySelectorAll('h2[role="heading"], div[dir="auto"]'));
-                for (const h of headings) {
-                    const text = (h.parentElement ? h.parentElement.innerText : h.innerText) || '';
-                    const match = text.match(/(\\d[\\d,.]*[KkMm]?)\\s*(posts?|帖子|ポスト|件のポスト)/i);
+                const elements = Array.from(document.querySelectorAll('h2, div, span, p'));
+                for (const h of elements) {
+                    const text = (h.innerText || h.textContent || '').trim();
+                    if (text.length > 25) continue;
+                    
+                    const match = text.match(/^(\\d[\\d,.]*[KkMm]?)\\s*(posts?|帖子|ポスト|件のポスト)$/i);
                     if (match) {
                         let numStr = match[1].toUpperCase();
                         let multiplier = 1;
@@ -364,16 +366,25 @@ def collect_profile_tweets(
     else:
         target_url = clean_profile_url(profile_url)
 
-    page.goto(target_url, wait_until="domcontentloaded", timeout=page_timeout)
-    page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
-    interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
-
     tweets: list[dict[str, str]] = []
     pending_rows: list[dict[str, str]] = []
     written_count = 0
     seen_ids = set()
     no_new_count = 0
     max_scrolls = max(1, int(max_scrolls or DEFAULT_MAX_SCROLLS))
+
+    try:
+        page.goto(target_url, wait_until="domcontentloaded", timeout=page_timeout)
+        page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
+    except PlaywrightTimeoutError:
+        if keyword:
+            log_line(log_callback, f"    搜索无结果或加载超时，跳过关键词 '{keyword}'。")
+            if writer:
+                return tweets, row_offset, written_count
+            return tweets
+        raise
+
+    interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
     log_line(log_callback, f"  开始采集 @{username} 主页帖子，最多滚动 {max_scrolls} 次。")
 
     for scroll_index in range(max_scrolls):
@@ -573,7 +584,13 @@ def run_x_profile_tweets_spider(
                     # 获取主页以提取帖文数
                     page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_load_timeout_val)
                     interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
-                    post_count = extract_post_count(page)
+                    post_count = None
+                    for attempt in range(10):
+                        post_count = extract_post_count(page)
+                        if post_count is not None:
+                            break
+                        if interruptible_sleep(0.5, stop_event):
+                            break
                     
                     if post_count is None:
                         log_line(log_callback, "  无法提取博主帖文数量，按全量模式正常采集。")

@@ -20,11 +20,11 @@ class TestYouTubeMetrics(unittest.TestCase):
         self.assertEqual(extract_video_id("dQw4w9WgXcQ"), "") # invalid url format
 
     def test_format_youtube_duration(self):
-        self.assertEqual(format_youtube_duration("PT1H2M10S"), "1:02:10")
-        self.assertEqual(format_youtube_duration("PT4M1S"), "4:01")
-        self.assertEqual(format_youtube_duration("PT3S"), "0:03")
-        self.assertEqual(format_youtube_duration("PT1H10S"), "1:00:10")
-        self.assertEqual(format_youtube_duration("P1D"), "") # We only support PT
+        self.assertEqual(format_youtube_duration("PT1H2M10S"), "01:02:10")
+        self.assertEqual(format_youtube_duration("PT4M1S"), "00:04:01")
+        self.assertEqual(format_youtube_duration("PT3S"), "00:00:03")
+        self.assertEqual(format_youtube_duration("PT1H10S"), "01:00:10")
+        self.assertEqual(format_youtube_duration("P1D"), "24:00:00")
 
     def test_parse_video_entries(self):
         with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as f:
@@ -56,6 +56,7 @@ class TestYouTubeMetrics(unittest.TestCase):
                     "snippet": {
                         "title": "Test Video 1",
                         "channelTitle": "Test Channel",
+                        "channelId": "UC123456",
                         "publishedAt": "2023-01-01T12:00:00Z",
                         "description": "Short description"
                     },
@@ -63,10 +64,10 @@ class TestYouTubeMetrics(unittest.TestCase):
                         "viewCount": "1000",
                         "likeCount": "100",
                         "commentCount": "10"
-                    },
-                    "contentDetails": {
-                        "duration": "PT1M15S"
-                    }
+                     },
+                     "contentDetails": {
+                         "duration": "PT1M15S"
+                     }
                 }
             ]
         }
@@ -75,12 +76,40 @@ class TestYouTubeMetrics(unittest.TestCase):
         self.assertIn("vid1", metrics)
         self.assertEqual(metrics["vid1"]["标题"], "Test Video 1")
         self.assertEqual(metrics["vid1"]["频道名称"], "Test Channel")
+        self.assertEqual(metrics["vid1"]["频道ID"], "UC123456")
         self.assertEqual(metrics["vid1"]["发布日期"], "2023-01-01 12:00:00")
-        self.assertEqual(metrics["vid1"]["视频时长"], "1:15")
+        self.assertEqual(metrics["vid1"]["视频时长"], "00:01:15")
         self.assertEqual(metrics["vid1"]["视频简介"], "Short description")
         self.assertEqual(metrics["vid1"]["播放量"], "1000")
         self.assertEqual(metrics["vid1"]["点赞数"], "100")
         self.assertEqual(metrics["vid1"]["评论数"], "10")
+
+    def test_format_youtube_datetime(self):
+        from src.platforms.youtube.comments import format_youtube_datetime
+        self.assertEqual(format_youtube_datetime("2023-11-20T12:34:56Z"), "2023-11-20 12:34:56")
+        self.assertEqual(format_youtube_datetime("2023-11-20 12:34:56"), "2023-11-20 12:34:56")
+        self.assertEqual(format_youtube_datetime("2023-11-20"), "2023-11-20")
+        self.assertEqual(format_youtube_datetime(""), "")
+
+    def test_build_video_url(self):
+        from src.platforms.youtube.comments import build_video_url
+        self.assertEqual(build_video_url("vid123", "Shorts"), "https://www.youtube.com/shorts/vid123")
+        self.assertEqual(build_video_url("vid123", "普通视频"), "https://www.youtube.com/watch?v=vid123")
+        self.assertEqual(build_video_url("vid123", "未知"), "https://www.youtube.com/watch?v=vid123")
+        self.assertEqual(build_video_url("vid123", "已删除"), "https://www.youtube.com/watch?v=vid123")
+        self.assertEqual(build_video_url("", "Shorts"), "")
+
+    def test_safe_filename_part(self):
+        from src.platforms.youtube.keyword import safe_filename_part
+        self.assertEqual(safe_filename_part("hello/world?"), "helloworld")
+        self.assertEqual(safe_filename_part("test  spaces"), "test_spaces")
+        self.assertEqual(safe_filename_part(""), "keyword")
+
+    def test_keyword_duration_format(self):
+        from src.platforms.youtube.keyword import format_youtube_duration
+        self.assertEqual(format_youtube_duration("PT1H2M10S"), "01:02:10")
+        self.assertEqual(format_youtube_duration("PT4M1S"), "00:04:01")
+        self.assertEqual(format_youtube_duration("PT3S"), "00:00:03")
 
 if __name__ == '__main__':
     unittest.main()

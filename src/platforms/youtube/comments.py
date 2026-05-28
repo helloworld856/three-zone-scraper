@@ -11,8 +11,24 @@ from googleapiclient.discovery import build
 
 from src.core import MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, sanitize_csv_row, sanitize_csv_rows, should_stop, wait_if_paused
 
-VIDEO_FIELDS = ["编号", "视频链接", "标题", "频道名称", "发布日期", "视频类型", "视频时长", "视频简介", "播放量", "点赞数", "评论数"]
+VIDEO_FIELDS = ["编号", "视频链接", "博主主页链接", "标题", "频道名称", "发布日期", "视频类型", "视频时长", "视频简介", "播放量", "点赞数", "评论数"]
 COMMENT_FIELDS = ["编号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
+
+def format_youtube_datetime(date_str: str) -> str:
+    if not date_str:
+        return ""
+    date_str = date_str.strip()
+    cleaned = date_str.replace("T", " ").replace("Z", "").strip()
+    if "." in cleaned:
+        cleaned = cleaned.split(".")[0]
+    return cleaned
+
+def build_video_url(video_id: str, video_type: str) -> str:
+    if not video_id:
+        return ""
+    if video_type == "Shorts":
+        return f"https://www.youtube.com/shorts/{video_id}"
+    return f"https://www.youtube.com/watch?v={video_id}"
 
 TOP_COMMENT_LIMIT = 100
 DEFAULT_SCAN_LIMIT = 500
@@ -92,24 +108,18 @@ def non_text_placeholder(snippet: dict) -> str:
         return "[贴纸]"
     return "[非文本]"
 
-def format_youtube_duration(duration: str) -> str:
-    # duration is ISO 8601, e.g. PT1H2M10S, PT4M1S, PT3S
-    if not duration or not duration.startswith("PT"):
+def format_youtube_duration(iso_duration: str) -> str:
+    match = re.fullmatch(
+        r"P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?",
+        iso_duration or "",
+    )
+    if not match:
         return ""
-    duration = duration[2:]
-    hours, minutes, seconds = 0, 0, 0
-    h_match = re.search(r"(\d+)H", duration)
-    if h_match:
-        hours = int(h_match.group(1))
-    m_match = re.search(r"(\d+)M", duration)
-    if m_match:
-        minutes = int(m_match.group(1))
-    s_match = re.search(r"(\d+)S", duration)
-    if s_match:
-        seconds = int(s_match.group(1))
-    if hours > 0:
-        return f"{hours}:{minutes:02d}:{seconds:02d}"
-    return f"{minutes}:{seconds:02d}"
+    days = int(match.group("days") or 0)
+    hours = int(match.group("hours") or 0) + days * 24
+    minutes = int(match.group("minutes") or 0)
+    seconds = int(match.group("seconds") or 0)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -121,15 +131,22 @@ def check_video_type_bulk(video_ids: list[str]) -> dict[str, str]:
     def check_one(vid: str) -> tuple[str, str]:
         req = urllib.request.Request(f"https://www.youtube.com/shorts/{vid}", method="HEAD")
         req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        try:
-            resp = opener.open(req, timeout=5)
-            if resp.status == 200:
-                return vid, "Shorts"
-        except urllib.error.HTTPError as e:
-            if e.code in (301, 302, 303, 307, 308):
-                return vid, "普通视频"
-        except Exception:
-            pass
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                resp = opener.open(req, timeout=5)
+                if resp.status == 200:
+                    return vid, "Shorts"
+            except urllib.error.HTTPError as e:
+                if e.code in (301, 302, 303, 307, 308):
+                    return vid, "普通视频"
+                if attempt < max_attempts - 1:
+                    time.sleep(0.5 * (2 ** attempt))
+                    continue
+            except (urllib.error.URLError, Exception):
+                if attempt < max_attempts - 1:
+                    time.sleep(0.5 * (2 ** attempt))
+                    continue
         return vid, "未知"
 
     results = {}
@@ -163,6 +180,7 @@ def fetch_video_metrics(youtube, video_ids: list[str]) -> dict[str, dict]:
             result[vid] = {
                 "标题": snippet.get("title", ""),
                 "频道名称": snippet.get("channelTitle", ""),
+                "频道ID": snippet.get("channelId", ""),
                 "发布日期": pub_date,
                 "视频时长": format_youtube_duration(content.get("duration", "")),
                 "视频简介": desc,
@@ -203,9 +221,7 @@ def fetch_top_level_comments(youtube, video_id: str, max_scan_comments: int, log
                 text = non_text_placeholder(snippet)
             published_at = str(snippet.get("publishedAt") or "")
             if published_at:
-                published_at = published_at.replace("T", " ").replace("Z", "").strip()
-                if "." in published_at:
-                    published_at = published_at.split(".")[0]
+                published_at = format_youtube_datetime(published_at)
             comments.append(
                 {
                     "like_count": int(snippet.get("likeCount", 0) or 0),
@@ -310,14 +326,37 @@ def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: 
 
             log_callback(f"[{progress_index}/{len(entries)}] 处理编号 {video_index}：{video_url}")
             
-            v_info = metrics_map.get(video_id, {})
+            v_info = metrics_map.get(video_id)
+            detected_type = ""
+            if not v_info:
+                v_info = {
+                    "标题": "[已删除或不可用]",
+                    "频道名称": "",
+                    "频道ID": "",
+                    "发布日期": "",
+                    "视频时长": "",
+                    "视频简介": "",
+                    "播放量": "",
+                    "点赞数": "",
+                    "评论数": "",
+                }
+                detected_type = "已删除"
+            elif check_type_bool:
+                detected_type = type_map.get(video_id, "未知")
+            
+            final_pub_date = format_youtube_datetime(v_info.get("发布日期", ""))
+            final_video_url = build_video_url(video_id, detected_type)
+            channel_id = v_info.get("频道ID", "")
+            channel_url = f"https://www.youtube.com/channel/{channel_id}" if channel_id else ""
+            
             row_video = {
                 "编号": str(video_index),
-                "视频链接": video_url,
+                "视频链接": final_video_url,
+                "博主主页链接": channel_url,
                 "标题": v_info.get("标题", ""),
                 "频道名称": v_info.get("频道名称", ""),
-                "发布日期": v_info.get("发布日期", ""),
-                "视频类型": type_map.get(video_id, "") if check_type_bool else "",
+                "发布日期": final_pub_date,
+                "视频类型": detected_type,
                 "视频时长": v_info.get("视频时长", ""),
                 "视频简介": v_info.get("视频简介", ""),
                 "播放量": v_info.get("播放量", ""),
@@ -329,9 +368,9 @@ def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: 
                 writer.writerow("视频信息", sanitize_csv_row(row_video))
                 
                 try:
-                    rows = top_comment_rows(youtube, video_index, video_url, video_id, max_scan_comments, log_callback, stop_event, pause_event, top_comment_limit, api_page_size)
+                    rows = top_comment_rows(youtube, video_index, final_video_url, video_id, max_scan_comments, log_callback, stop_event, pause_event, top_comment_limit, api_page_size)
                     if not rows:
-                        rows = [empty_video_row(video_index, video_url)]
+                        rows = [empty_video_row(video_index, final_video_url)]
                     for r in sanitize_csv_rows(rows):
                         writer.writerow("评论信息", r)
                     written_comments = len([row for row in rows if row["评论内容"]])
@@ -341,7 +380,7 @@ def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: 
                         log_callback(f"  停止任务：API 配额耗尽 ({exc})，请更换 API Key。")
                         break
                     else:
-                        writer.writerow("评论信息", sanitize_csv_row(empty_video_row(video_index, video_url)))
+                        writer.writerow("评论信息", sanitize_csv_row(empty_video_row(video_index, final_video_url)))
                         log_callback(f"  抓取评论失败：{exc}，已写入空评论占位行。")
             else:
                 writer.writerow(sanitize_csv_row(row_video))

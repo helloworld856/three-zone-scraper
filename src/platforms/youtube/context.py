@@ -152,6 +152,8 @@ def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: s
 
 def fetch_video_details(youtube, video_ids: list[str], stop_event=None, pause_event=None) -> dict[str, dict]:
     details: dict[str, dict] = {}
+    from src.platforms.youtube.keyword import format_youtube_duration as kw_format
+    
     for start in range(0, len(video_ids), 50):
         if should_stop(stop_event):
             break
@@ -168,9 +170,18 @@ def fetch_video_details(youtube, video_ids: list[str], stop_event=None, pause_ev
         for item in res.get("items", []):
             stats = item.get("statistics", {})
             snippet = item.get("snippet", {})
+            content = item.get("contentDetails", {})
+            desc = snippet.get("description", "").replace("\n", " | ").replace("\r", "")
+            if len(desc) > 300:
+                desc = desc[:300] + "..."
+                
             details[item["id"]] = {
                 "title": snippet.get("title", ""),
                 "published_at": snippet.get("publishedAt", ""),
+                "channel_title": snippet.get("channelTitle", ""),
+                "channel_id": snippet.get("channelId", ""),
+                "duration": kw_format(content.get("duration", "")),
+                "description": desc,
                 "view_count": stats.get("viewCount", ""),
                 "like_count": stats.get("likeCount", ""),
                 "comment_count": stats.get("commentCount", ""),
@@ -181,9 +192,16 @@ OUTPUT_FIELDS = [
     "博主链接",
     "目标视频链接",
     "视频链接",
+    "博主主页链接",
     "时间轴关系",
+    "标题",
     "视频标题",
+    "频道名称",
+    "发布日期",
     "发布时间",
+    "视频类型",
+    "视频时长",
+    "视频简介",
     "播放量",
     "点赞数",
     "评论数",
@@ -222,16 +240,29 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
         return rows
 
     details = fetch_video_details(youtube, selected_ids, stop_event, pause_event)
+    from src.platforms.youtube.comments import format_youtube_datetime
     for vid in selected_ids:
         current_index = timeline_ids.index(vid)
         item = details.get(vid, {})
+        channel_id = item.get("channel_id", "")
+        channel_url = f"https://www.youtube.com/channel/{channel_id}" if channel_id else ""
+        
+        final_pub_date = format_youtube_datetime(item.get("published_at", ""))
+        
         rows.append({
             "博主链接": profile_url,
             "目标视频链接": target_video_url,
             "视频链接": f"https://www.youtube.com/watch?v={vid}",
+            "博主主页链接": channel_url,
             "时间轴关系": relation_for_index(target_index, current_index),
+            "标题": item.get("title", ""),
             "视频标题": item.get("title", ""),
-            "发布时间": item.get("published_at", ""),
+            "频道名称": item.get("channel_title", ""),
+            "发布日期": final_pub_date,
+            "发布时间": final_pub_date,
+            "视频类型": "",
+            "视频时长": item.get("duration", ""),
+            "视频简介": item.get("description", ""),
             "播放量": item.get("view_count", ""),
             "点赞数": item.get("like_count", ""),
             "评论数": item.get("comment_count", ""),
